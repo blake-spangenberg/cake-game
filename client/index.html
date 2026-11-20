@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cake Cut</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="clock"></div>
+    <div id="cameras">
+      <button data-camera="front">Front</button>
+      <button data-camera="side">Side</button>
+      <button data-camera="low">Low</button>
+      <button data-camera="top">Top</button>
+    </div>
+    <button id="cut">Cut!</button>
+    <div id="result" hidden>
+      <div id="grams"></div>
+      <button id="again">Again</button>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

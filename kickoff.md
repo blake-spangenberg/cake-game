@@ -1,0 +1,54 @@
+# Kickoff
+
+## Elevator Pitch
+
+A fun competitive game that can be started and finished in about a minute given a Zoom room filled with a dozen people and enjoyed multiple days in a row. Players position and cut a 3D cake in half with a knife and are judged by how accurately their cut split the cake in half.
+
+The game is intuitive (it depicts a scenario that could exist in the real world) and the resulting player rank is definitive and undisputable.
+
+## For the concept to stick the landing
+
+- The game runs in a browser tab opened from a link posted in the Zoom chat. No program installs, accounts, controllers, etc. Players must be able to join late and near instantaneously: a late joiner spectates the round in progress and plays the next one.
+    - Not a Zoom App: publishing one for guests outside the host's Zoom account takes Zoom's Marketplace review (4-12 weeks), and guest mode only reaches invited, unauthenticated participants. Keep the web build able to run inside Zoom's embedded browser (WebView2) so a Zoom App stays possible later.
+- There must be more than 1 cake, either selected randomly or chosen by the host
+- The game must be fair. All players must have the same: time, cake, knife, starting positions. The cut must be deterministic given the cake/knife position/orientation.
+- The time players have to make their cut must be limited to 30 seconds. When time runs out, the game presses `Cut!` for the player and that cut is judged like any other.
+- The controls and the measurement must be precise so there are no ties. Only identical cuts can tie, and the earlier cut wins; players who never touched the controls share their rank.
+- The controls must be simple, intuitive, and mouse only: no keyboard input is ever required. Use words, numbers, instruction, etc. as a last result to communicate to the player, prefer diagetic information.
+- The knife's cut plane always passes through a fixed point above the cutting region. The knife moves on three axes: an arc across an invisible half-dome around that point (tilt), a rotation around the point (heading), and a lowering toward the cake to check the line, which stops at the cake's surface without pushing it and springs back up when the player lets go of that control and never cuts. A big, obvious `Cut!` button, clearly separated from the other controls, freezes time, physics, and input and performs the cut immediately along the knife's current pose, so a cake still settling is cut as it is at that instant. Tilt is limited to roughly 45-60 degrees from vertical, so every cut still looks like slicing a cake.
+- The cake moves one way only: the player picks it up by mouse click at a point on its surface and it hangs from that point under gravity. Grabbing a tall cake near its bottom and lifting it flips it inverted in the hand, and it lands in that orientation when lowered back to the table. Letting go hands the cake to gravity and table collision in full, and it settles at its natural resting pose. Where the cake is set down decides where the cut plane lands, and how it was grabbed decides its orientation, so knife and cake together reach every plane.
+- The perspective must not be ambigious. A cut must not be unexpectedly bad for a player due to the player's misunderstanding due to an illusion of perspective. Players can check the knife against the cake from alternate camera angles and by lowering the knife. Knife and cake cast shadows on the table and each other as natural depth cues.
+- A cut must be final.
+- The game should rely on player entropy to increase variance of outcome. For example, do not start the knife over the cake but rather each on separate sides of the table. Start the knife at an unhelpful orientation. The more input distance that is required of players, the more a skilled player can express their advantage.
+- Players must be able to see their opponents knife and cake movements in realtime, and clearly see when they have completed their cut. The view is full fidelity: copying a rival's line is part of the game.
+- Players must not be able to see any player's score including their own until all players have completed the cut or time elapses.
+- Result calulation must be dramatic (with pomp and circumstance). Cakes presented and judged one-by-one, from the worst cut to the best: each half placed on a balance scale and the grams tick up from 0 before the final score is revealed. The full reveal is worth a round running past a minute.
+- Weight is volume: every material has the same density, so the scale's grams are volume times a constant and a cut can be judged by eye.
+- Cakes must not be limited only to traditional looking cakes, especially since traditional cakes are most commonly symmetical. Steer from simple geometric shapes and symetrical designs. Asymmetry comes from:
+    - cakes that are asymmetric as sourced
+    - damage to a sourced cake: a missing slice, a bite, a collapsed tier
+    - models that were never meant to be cakes (e.g. a rubber duck with a scarf), whose cake nature is revealed only when the cut exposes the layers inside
+- Cut faces show cake inside, since the secret-cake reveal depends on it.
+- Nothing carries over between rounds: no leaderboard, no stored player identity.
+
+## Stretch goals
+
+- Realistic cake layer texture on the cut faces
+- Setting the cake on the table in any orientation other than its serving orientation leaves frosting smudges. Smudges are cosmetic and never change the weighed halves.
+- The player's cursor is a hand that roughly animates open and closed as it grabs the cake and knife
+
+## Design considerations
+- Prefer self-hosted multiplayer server, and generally minimize vendor reliance. The server runs on the developer's home machine and must be reachable over HTTPS by guests outside the company.
+- Prefer to source existing 3D models of cakes rather than generate them. They are the star of the show and an agentic generated asset dulls the impression. Models must be free (CC0 or CC-BY), with credits shown in game.
+- The game must be performant. Consider WebAssembly or other technology which has a heavier implementation weight but better long-term effects.
+- Be mindful of the knife-to-cake size ratio individually and across the set of all cakes. Every cake must fit within the cutting region, and the blade must span the whole region at every tilt and heading, so no cake is limited in which cuts can reach it.
+
+## Phasing
+
+1. Clarify project principles and design requirements.
+
+2. Define tech stack, toolchain, development enviornment.
+
+3. Implement browser proof-of-concept
+
+4. Player test group.
