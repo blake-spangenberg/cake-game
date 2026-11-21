@@ -18,9 +18,24 @@ pub struct Split {
 pub const DENSITY_G_PER_M3: f64 = 1.0e6;
 
 impl Split {
-    pub fn calc_imbalance_m3(&self) -> f64 {
-        (self.above_m3 - self.below_m3).abs()
+    /// 100 for halves of equal volume, falling linearly with the imbalance to 0 for a cut that
+    /// misses.
+    pub fn calc_score(&self) -> f64 {
+        let total_m3 = self.above_m3 + self.below_m3;
+        if total_m3 <= 0.0 {
+            return 0.0;
+        }
+        100.0 * (1.0 - (self.above_m3 - self.below_m3).abs() / total_m3)
     }
+}
+
+/// Whether the plane passes between the points, rather than leaving them all on one side.
+pub fn is_crossing(positions: &[DVec3], plane: &Plane) -> bool {
+    let mut distances = positions.iter().map(|p| (p - plane.point).dot(plane.normal));
+    let Some(first) = distances.next() else {
+        return false;
+    };
+    distances.any(|distance| (distance > 0.0) != (first > 0.0))
 }
 
 /// Divides a closed mesh, given in world coordinates, by a plane. Each triangle is clipped to

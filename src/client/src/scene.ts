@@ -1,0 +1,298 @@
+import * as THREE from "three";
+import { type Game, type Layout, get_blade_outline, get_handle_centers } from "@wasm/cake_wasm.js";
+import { Spring } from "./spring";
+
+export type PickKind = "cake" | "knife" | "stand";
+
+const FROSTING = 0xf3e3ec;
+const SPONGE = 0xe8c07a;
+const TABLE_THICKNESS_M = 0.04;
+const LEG_SIDE_M = 0.06;
+const LEG_INSET_M = 0.08;
+const FLOOR_Y_M = -0.76;
+const RIM_BEAD_COUNT = 16;
+const HALF_GAP_M = 0.03;
+const HALF_GAP_HALF_LIFE_S = 0.12;
+/** Side of the plane drawn over a cut face, larger than any cake's section. */
+const CAP_SIZE_M = 1;
+/** Thickness of the invisible box around the knife that takes its clicks, since the blade seen edge-on is a hairline. */
+const KNIFE_GRIP_THICKNESS_M = 0.04;
+
+/** Every object the player sees, rebuilt per round from the game's mesh and poses. */
+export class Scene {
+  readonly renderer: THREE.WebGLRenderer;
+  readonly camera = new THREE.PerspectiveCamera(40, 1, 0.01, 20);
+  private readonly scene = new THREE.Scene();
+  private readonly cake = new THREE.Group();
+  private readonly knife = new THREE.Group();
+  private readonly stand = new THREE.Group();
+  private readonly pivot: THREE.Vector3;
+  private readonly halfGap = new Spring(0, HALF_GAP_HALF_LIFE_S);
+  private halves: { group: THREE.Group; cap: THREE.Mesh; clip: THREE.Plane; offset: THREE.Vector3 }[] = [];
+
+  constructor(
+    canvas: HTMLCanvasElement,
+    private readonly layout: Layout,
+  ) {
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true, powerPreference: "high-performance" });
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.localClippingEnabled = true;
+    this.scene.background = new THREE.Color(0x1d1b19);
+    this.pivot = new THREE.Vector3(0, layout.pivot_y_m, 0);
+    this.addLights();
+    this.addTable();
+    this.buildStand();
+    this.buildKnife();
+    this.cake.userData.pick = "cake";
+    this.knife.matrixAutoUpdate = false;
+    this.scene.add(this.cake, this.knife, this.stand);
+  }
+
+  /** The kind of object the ray first meets, and where, or none for the room around them. */
+  pick(raycaster: THREE.Raycaster): { kind: PickKind; point: THREE.Vector3 } | null {
+    const hit = raycaster.intersectObjects(this.scene.children, true).find((candidate) => candidate.object.visible);
+    for (let object: THREE.Object3D | null = hit?.object ?? null; object; object = object.parent) {
+      if (object.userData.pick) return { kind: object.userData.pick, point: hit!.point };
+    }
+    return null;
+  }
+
+  /** Replaces the cake with the game's mesh, whole. */
+  resetCake(game: Game): void {
+    for (const half of this.halves) this.scene.remove(half.group, half.cap);
+    this.halves = [];
+    this.cake.clear();
+    const mesh = new THREE.Mesh(buildCakeGeometry(game), new THREE.MeshStandardMaterial({ color: FROSTING }));
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    this.cake.add(mesh);
+    this.cake.visible = true;
+  }
+
+  sync(game: Game): void {
+    const pose = game.cake_pose();
+    this.cake.position.set(pose[0], pose[1], pose[2]);
+    this.cake.quaternion.set(pose[3], pose[4], pose[5], pose[6]);
+    this.stand.rotation.y = game.stand_angle_rad();
+    this.placeKnife(game, game.knife_pose()[1], 0);
+  }
+
+  /**
+   * Draws the knife lowered by `lowerM` within its plane, rocked by `rockRad` about the center
+   * of its curved edge, as a mezzaluna rocks through a cut.
+   */
+  placeKnife(game: Game, lowerM: number, rockRad: number): void {
+    const f = game.knife_frame();
+    const edge = new THREE.Vector3(f[0], f[1], f[2]);
+    const down = new THREE.Vector3(f[3], f[4], f[5]);
+    const up = down.clone().negate();
+    const edgeMiddle = this.pivot.clone().addScaledVector(down, lowerM);
+    const arcCenter = new THREE.Vector3(0, this.layout.blade_arc_radius_m, 0);
+    const rock = new THREE.Matrix4()
+      .makeTranslation(arcCenter)
+      .multiply(new THREE.Matrix4().makeRotationZ(rockRad))
+      .multiply(new THREE.Matrix4().makeTranslation(arcCenter.clone().negate()));
+    this.knife.matrix.makeBasis(edge, up, edge.clone().cross(up)).setPosition(edgeMiddle).multiply(rock);
+    this.knife.matrixWorldNeedsUpdate = true;
+  }
+
+  /**
+   * Swaps the whole cake for its two halves along the knife's plane, closed until `partHalves`.
+   * Each half's cut face is a sponge plane masked to the half's inside through the stencil
+   * buffer, which works for any closed mesh without building cap geometry.
+   */
+  showHalves(game: Game): void {
+    const f = game.knife_frame();
+    const normal = new THREE.Vector3(f[6], f[7], f[8]);
+    const geometry = buildCakeGeometry(game);
+    this.halfGap.snap(0);
+    for (const [idx, side] of [1, -1].entries()) {
+      const keepNormal = normal.clone().multiplyScalar(side);
+      const clip = new THREE.Plane().setFromNormalAndCoplanarPoint(keepNormal, this.pivot);
+      const group = new THREE.Group();
+      const placeLikeCake = (mesh: THREE.Mesh) => {
+        mesh.position.copy(this.cake.position);
+        mesh.quaternion.copy(this.cake.quaternion);
+        group.add(mesh);
+      };
+      const frosting = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: FROSTING, clippingPlanes: [clip], clipShadows: true }));
+      frosting.castShadow = true;
+      placeLikeCake(frosting);
+      for (const [faces, stencilOp] of [
+        [THREE.BackSide, THREE.IncrementWrapStencilOp],
+        [THREE.FrontSide, THREE.DecrementWrapStencilOp],
+      ] as const) {
+        const counter = new THREE.Mesh(geometry, buildStencilCounter(faces, stencilOp, clip));
+        counter.renderOrder = idx + 1;
+        placeLikeCake(counter);
+      }
+      const cap = new THREE.Mesh(new THREE.PlaneGeometry(CAP_SIZE_M, CAP_SIZE_M), buildCapMaterial());
+      cap.renderOrder = idx + 1.5;
+      cap.onAfterRender = (renderer) => renderer.clearStencil();
+      this.scene.add(cap);
+      this.halves.push({ group, cap, clip, offset: keepNormal });
+      this.scene.add(group);
+    }
+    this.cake.visible = false;
+  }
+
+  partHalves(): void {
+    this.halfGap.target = HALF_GAP_M;
+  }
+
+  render(dtS: number): void {
+    const gap = this.halfGap.step(dtS);
+    for (const half of this.halves) {
+      const cutPoint = this.pivot.clone().addScaledVector(half.offset, gap);
+      half.group.position.copy(half.offset).multiplyScalar(gap);
+      half.clip.setFromNormalAndCoplanarPoint(half.offset, cutPoint);
+      half.cap.position.copy(cutPoint);
+      half.cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), half.offset.clone().negate());
+    }
+    const canvas = this.renderer.domElement;
+    if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+      this.renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+      this.camera.aspect = canvas.clientWidth / canvas.clientHeight;
+      this.camera.updateProjectionMatrix();
+    }
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  private addLights(): void {
+    this.scene.add(new THREE.HemisphereLight(0xfff4e0, 0x2a2420, 1.2));
+    const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+    sun.position.set(0.5, 2.0, 0.8);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.bias = -0.0005;
+    const extent = 1.3;
+    Object.assign(sun.shadow.camera, { left: -extent, right: extent, top: extent, bottom: -extent, near: 0.5, far: 5 });
+    this.scene.add(sun);
+  }
+
+  private addTable(): void {
+    const { table_half_x_m: halfX, table_half_z_m: halfZ } = this.layout;
+    const wood = new THREE.MeshStandardMaterial({ color: 0x7a5236, roughness: 0.8 });
+    const top = new THREE.Mesh(new THREE.BoxGeometry(2 * halfX, TABLE_THICKNESS_M, 2 * halfZ).translate(0, -TABLE_THICKNESS_M / 2, 0), wood);
+    top.castShadow = true;
+    top.receiveShadow = true;
+    this.scene.add(top);
+    const legLenM = -TABLE_THICKNESS_M - FLOOR_Y_M;
+    for (const [sx, sz] of [
+      [1, 1],
+      [1, -1],
+      [-1, 1],
+      [-1, -1],
+    ]) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(LEG_SIDE_M, legLenM, LEG_SIDE_M), wood);
+      leg.position.set(sx * (halfX - LEG_INSET_M), FLOOR_Y_M + legLenM / 2, sz * (halfZ - LEG_INSET_M));
+      leg.castShadow = true;
+      this.scene.add(leg);
+    }
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(10, 10).rotateX(-Math.PI / 2).translate(0, FLOOR_Y_M, 0),
+      new THREE.MeshStandardMaterial({ color: 0x3a332c, roughness: 0.95 }),
+    );
+    floor.receiveShadow = true;
+    this.scene.add(floor);
+  }
+
+  /** Plate, column, and base, with beads around the rim so its turning shows. */
+  private buildStand(): void {
+    const layout = this.layout;
+    const ceramic = new THREE.MeshStandardMaterial({ color: 0xf2efe8, roughness: 0.35 });
+    const columnTopM = layout.stand_top_y_m - layout.stand_plate_thickness_m;
+    const parts: [number, number, number][] = [
+      [layout.stand_radius_m, columnTopM, layout.stand_top_y_m],
+      [layout.stand_column_radius_m, layout.stand_base_thickness_m, columnTopM],
+      [layout.stand_base_radius_m, 0, layout.stand_base_thickness_m],
+    ];
+    for (const [radiusM, y0M, y1M] of parts) {
+      const part = new THREE.Mesh(new THREE.CylinderGeometry(radiusM, radiusM, y1M - y0M, 64).translate(0, (y0M + y1M) / 2, 0), ceramic);
+      part.castShadow = true;
+      part.receiveShadow = true;
+      this.stand.add(part);
+    }
+    const beadRadiusM = layout.stand_plate_thickness_m * 0.45;
+    const bead = new THREE.SphereGeometry(beadRadiusM, 12, 8);
+    const beadMaterial = new THREE.MeshStandardMaterial({ color: 0xc9a86a, roughness: 0.4, metalness: 0.5 });
+    for (let i = 0; i < RIM_BEAD_COUNT; i += 1) {
+      const angle = (2 * Math.PI * i) / RIM_BEAD_COUNT;
+      const mesh = new THREE.Mesh(bead, beadMaterial);
+      mesh.position.set(Math.cos(angle) * layout.stand_radius_m, columnTopM + layout.stand_plate_thickness_m / 2, Math.sin(angle) * layout.stand_radius_m);
+      this.stand.add(mesh);
+    }
+    this.stand.userData.pick = "stand";
+  }
+
+  /** A mezzaluna: a crescent blade from the core's outline, with an upright handle at each end. */
+  private buildKnife(): void {
+    const layout = this.layout;
+    const outline = get_blade_outline();
+    const shape = new THREE.Shape();
+    shape.moveTo(outline[0], outline[1]);
+    for (let i = 2; i < outline.length; i += 2) shape.lineTo(outline[i], outline[i + 1]);
+    shape.closePath();
+    const blade = new THREE.Mesh(
+      new THREE.ExtrudeGeometry(shape, { depth: layout.blade_thickness_m, bevelEnabled: false }).translate(0, 0, -layout.blade_thickness_m / 2),
+      new THREE.MeshStandardMaterial({ color: 0xcfd6dc, metalness: 0.8, roughness: 0.3, side: THREE.DoubleSide }),
+    );
+    blade.castShadow = true;
+    const gripHeightM = layout.blade_back_m + layout.handle_len_m;
+    const grip = new THREE.Mesh(
+      new THREE.BoxGeometry(2 * layout.blade_half_span_m, gripHeightM, KNIFE_GRIP_THICKNESS_M).translate(0, gripHeightM / 2, 0),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    );
+    this.knife.add(blade, grip);
+    const centers = get_handle_centers();
+    const wood = new THREE.MeshStandardMaterial({ color: 0x5b3a29, roughness: 0.7 });
+    const handle = new THREE.CylinderGeometry(layout.handle_radius_m, layout.handle_radius_m, layout.handle_len_m, 24);
+    for (let i = 0; i < centers.length; i += 3) {
+      const mesh = new THREE.Mesh(handle, wood);
+      mesh.position.set(centers[i], centers[i + 1], centers[i + 2]);
+      mesh.castShadow = true;
+      this.knife.add(mesh);
+    }
+    this.knife.userData.pick = "knife";
+  }
+}
+
+/** Counts, per pixel, the half's surfaces behind the cut: nonzero exactly where the cut face shows. */
+function buildStencilCounter(faces: THREE.Side, stencilOp: THREE.StencilOp, clip: THREE.Plane): THREE.Material {
+  return new THREE.MeshBasicMaterial({
+    side: faces,
+    clippingPlanes: [clip],
+    colorWrite: false,
+    depthWrite: false,
+    depthTest: false,
+    stencilWrite: true,
+    stencilFunc: THREE.AlwaysStencilFunc,
+    stencilFail: stencilOp,
+    stencilZFail: stencilOp,
+    stencilZPass: stencilOp,
+  });
+}
+
+/** Sponge drawn only where the stencil count marks the cut face, resetting the count as it goes. */
+function buildCapMaterial(): THREE.Material {
+  return new THREE.MeshStandardMaterial({
+    color: SPONGE,
+    side: THREE.DoubleSide,
+    stencilWrite: true,
+    stencilRef: 0,
+    stencilFunc: THREE.NotEqualStencilFunc,
+    stencilFail: THREE.ReplaceStencilOp,
+    stencilZFail: THREE.ReplaceStencilOp,
+    stencilZPass: THREE.ReplaceStencilOp,
+  });
+}
+
+function buildCakeGeometry(game: Game): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(game.cake_positions(), 3));
+  geometry.setIndex(new THREE.BufferAttribute(game.cake_triangles(), 1));
+  const faceted = geometry.toNonIndexed();
+  faceted.computeVertexNormals();
+  return faceted;
+}

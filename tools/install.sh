@@ -20,9 +20,9 @@ ensure_winget_package() {
 
 ensure_wasm_bindgen() {
     local version
-    version=$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' wasm/Cargo.toml)
+    version=$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' src/wasm/Cargo.toml)
     if [[ -z $version ]]; then
-        echo "wasm/Cargo.toml: no exact wasm-bindgen = \"=<version>\" pin to match the CLI to" >&2
+        echo "src/wasm/Cargo.toml: no exact wasm-bindgen = \"=<version>\" pin to match the CLI to" >&2
         exit 1
     fi
     if [[ "$(build/cargo/bin/wasm-bindgen --version 2> /dev/null)" == "wasm-bindgen $version" ]]; then
@@ -35,4 +35,4 @@ ensure_winget_package rustup Rustlang.Rustup
 ensure_winget_package node OpenJS.NodeJS.LTS
 rustup toolchain install
 ensure_wasm_bindgen
-(cd client && npm install --no-audit --no-fund)
+(cd src/client && npm install --no-audit --no-fund)

@@ -9,7 +9,7 @@
     "noUnusedParameters": true,
     "skipLibCheck": true,
     "types": ["vite/client"],
-    "paths": { "@wasm/*": ["../build/wasm/*"] }
+    "paths": { "@wasm/*": ["../../build/wasm/*"] }
   },
   "include": ["src"]
 }

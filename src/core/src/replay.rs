@@ -9,25 +9,20 @@ use crate::table::CAKE_SPAWN;
 pub const CHECKPOINT_INTERVAL_TICKS: usize = 30;
 const SCRIPT_TICKS: usize = 600;
 
-/// Grabs the placeholder cake by its highest point, carries it to the table's center, drops it,
-/// then sweeps the knife while lowering it, ending without a cut.
+/// Grabs the placeholder cake by its highest point, carries it onto the stand and places it,
+/// then turns the stand while tilting and lowering the knife, ending without a cut.
 pub fn build_scripted_inputs() -> Vec<Input> {
     let model = build_slice_missing_cake();
     let top = model.mesh.positions.iter().copied().fold(model.mesh.positions[0], |a, b| if b.y > a.y { b } else { a });
     let grab_at = [CAKE_SPAWN.x + top.x as f64, top.y as f64, CAKE_SPAWN.z + top.z as f64]
         .map(|m| (m / POSITION_UNIT_M).round() as i32);
     let start_tilt = (START_KNIFE.tilt_rad / ANGLE_UNIT_RAD).round() as i32;
-    let start_heading = (START_KNIFE.heading_rad / ANGLE_UNIT_RAD).round() as i32;
     (0..SCRIPT_TICKS)
         .map(|tick| {
             let tick = tick as i32;
             let hand = (20..240).contains(&tick).then_some(HandInput { grab_at, target_xz: [0, 2_000] });
-            let knife = KnifeInput {
-                tilt: start_tilt - 300 * tick.min(400),
-                heading: start_heading + 500 * tick,
-                is_lowering: tick >= 300,
-            };
-            Input { hand, knife }
+            let knife = KnifeInput { tilt: start_tilt - 300 * tick.min(400), lower: 100 * (tick - 300).max(0) };
+            Input { hand, knife, stand_angle: 400 * (tick - 300).max(0) }
         })
         .collect()
 }
@@ -35,7 +30,7 @@ pub fn build_scripted_inputs() -> Vec<Input> {
 /// Replays `inputs` on a fresh world, returning its hash every [`CHECKPOINT_INTERVAL_TICKS`],
 /// then the bits of the cut's two volumes when cut at the end.
 pub fn replay(inputs: &[Input]) -> Vec<u64> {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE);
+    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
     let mut checkpoints = Vec::new();
     for (idx, input) in inputs.iter().enumerate() {
         world.step(input);

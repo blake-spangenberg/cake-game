@@ -28,13 +28,13 @@ install: build/.gitignore
 	bash tools/install.sh
 
 run: wasm
-	cd client && npm run dev
+	cd src/client && npm run dev
 
 test: wasm
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 	cargo test
-	cd client && npm run check
+	cd src/client && npm run check
 	cargo run -q --release -p cake-core --example replay > build/replay-native.txt
 	node tools/replay-wasm.mjs > build/replay-wasm.txt
 	diff build/replay-native.txt build/replay-wasm.txt
@@ -43,7 +43,7 @@ format:
 	cargo fmt
 
 clean:
-	rm -rf build client/node_modules
+	rm -rf build src/client/node_modules
 
 wasm: build/.gitignore
 	cargo build --release --target wasm32-unknown-unknown -p cake-wasm

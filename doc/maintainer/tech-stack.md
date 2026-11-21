@@ -15,8 +15,8 @@ The settled stack for the browser proof of concept and beyond.
 ## Server authority
 Clients are untrusted. The server replays every player's inputs in its own copy of that player's world and scores the cut it computes, so no one can fake a cut. Every player's cake and knife are independent of everyone else's, so no rollback is needed: the local player simulates instantly, and the server runs a round trip behind.
 - The simulation steps at a fixed 60 Hz and counts ticks. Clients send tick-stamped inputs, never poses.
-- Inputs are quantized before they enter the simulation: the client casts the mouse ray in TypeScript, then sends and simulates the same fixed-point target. Nothing computed with JS `Math` functions reaches the core unquantized.
-- `client/src/controls.ts` hand-encodes the core's input wire format, so it changes together with `core/src/input.rs`.
+- Inputs are quantized before they enter the simulation: the client casts rays and eases controls in TypeScript, then sends and simulates the same fixed-point values. Nothing computed with JS `Math` functions reaches the core unquantized.
+- `src/client/src/controls.ts` hand-encodes the core's input wire format, so it changes together with `src/core/src/input.rs`.
 - Sim code must stay deterministic across native and WASM: transcendental math only through `libm` or nalgebra's own functions, no iteration over `HashMap` or `HashSet` (randomly seeded), no threads, no Rapier `parallel` or `simd` features. One exact Rapier version.
 - `Cut!` carries its tick. The server replays to it, freezes, and cuts. Timeout is the server cutting at the round's final tick, and inputs stamped after it are dropped.
 - Spectators receive poses streamed from the server's replay. A late joiner gets the current poses and the round state, with no input history.
@@ -24,13 +24,13 @@ Clients are untrusted. The server replays every player's inputs in its own copy 
 - Determinism test: one recorded input log replayed natively and in WASM must give the same world-snapshot hash at every checkpoint. `make test` runs it, so it reruns on every Rapier or Rust toolchain upgrade.
 
 ## Cut and weigh
-Each model has uniform density, so grams are volume times a constant. Scoring clips the mesh's triangles against the cut plane and sums the signed tetrahedron volumes to a point on that plane, so the cap contributes nothing and needs no triangulation. Drawing the halves does need the cap, so the proof of concept chooses between building it in the core and building it in the client with `manifold-3d`. Both depend on the mesh being closed.
+Each model has uniform density, so grams are volume times a constant. Scoring clips the mesh's triangles against the cut plane and sums the signed tetrahedron volumes to a point on that plane, so the cap contributes nothing and needs no triangulation. Drawing the halves caps each cut face through the stencil buffer, which needs no cap geometry but, like scoring, depends on the mesh being closed. Real cap geometry (core-built or `manifold-3d`) waits until cut faces need textured layers.
 
 ## Asset pipeline
 Most free models are not watertight, so a scripted step repairs and validates each one, and models it cannot fix are set aside to repair by hand or drop. Per model, the script:
 - Repairs it to a closed mesh, likely through headless Blender (`blender --background --python`), which reads and writes glTF
 - Rejects it unless every edge borders exactly two consistently wound triangles, and checks its bounds against the cutting region and blade span
-- Precomputes the physics collider as a convex decomposition (`parry3d`'s V-HACD), since a dynamic triangle-mesh collider is unstable, and sets mass and center of mass from the render mesh so the cake hangs where its shape says it should
+- Precomputes the physics collider as a convex decomposition (`parry3d`'s V-HACD) into hulls of few vertices each, since a dynamic triangle-mesh collider is unstable and a hull face with many vertices jitters on the table and never sleeps, and sets mass and center of mass from the render mesh so the cake hangs where its shape says it should
 
 ## Ruled out
 - Bevy and Godot's web export: download size works against near-instant late joins, and Godot's physics promises no cross-platform determinism
