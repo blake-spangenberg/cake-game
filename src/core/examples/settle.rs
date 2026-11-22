@@ -2,10 +2,10 @@
 //! tuning the physics against jitter: every 10 ticks, its position, speed, and spin.
 
 use cake_core::cakes::build_slice_missing_cake;
-use cake_core::input::{ANGLE_UNIT_RAD, HandInput, Input, KnifeInput, POSITION_UNIT_M};
+use cake_core::input::{ANGLE_UNIT_RAD, HandInput, Input, KnifeInput, quantize_radians};
 use cake_core::knife::START_KNIFE;
+use cake_core::replay::calc_spawned_top_grab_at;
 use cake_core::sim::{TICKS_PER_S, World};
-use cake_core::table::CAKE_SPAWN;
 
 const CARRY_END_TICK: i32 = 150;
 const RELEASE_TICK: i32 = 300;
@@ -15,10 +15,8 @@ const END_TICK: i32 = 800;
 
 fn main() {
     let model = build_slice_missing_cake();
-    let top = model.mesh.positions.iter().copied().fold(model.mesh.positions[0], |a, b| if b.y > a.y { b } else { a });
-    let grab_at = [CAKE_SPAWN.x + top.x as f64, top.y as f64, CAKE_SPAWN.z + top.z as f64]
-        .map(|m| (m / POSITION_UNIT_M).round() as i32);
-    let start_tilt = (START_KNIFE.tilt_rad / ANGLE_UNIT_RAD).round() as i32;
+    let grab_at = calc_spawned_top_grab_at(&model);
+    let start_tilt = quantize_radians(START_KNIFE.tilt_rad);
     let mut world = World::create(model, START_KNIFE, None);
     let mut last = world.get_cake_pose();
     println!("tick holding      x      y      z   speed_m_s  spin_rad_s");

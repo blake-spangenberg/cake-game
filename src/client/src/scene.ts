@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { type Game, type Layout, get_blade_outline, get_handle_centers } from "@wasm/cake_wasm.js";
+import { type Game, type Layout, get_blade_outline, get_handle_centers, get_stand_parts } from "@wasm/cake_wasm.js";
 import { Spring } from "./spring";
 
 export type PickKind = "cake" | "knife" | "stand";
@@ -71,11 +71,11 @@ export class Scene {
   }
 
   sync(game: Game): void {
-    const pose = game.cake_pose();
+    const pose = game.get_cake_pose();
     this.cake.position.set(pose[0], pose[1], pose[2]);
     this.cake.quaternion.set(pose[3], pose[4], pose[5], pose[6]);
-    this.stand.rotation.y = game.stand_angle_rad();
-    this.placeKnife(game, game.knife_pose()[1], 0);
+    this.stand.rotation.y = game.get_stand_angle_rad();
+    this.placeKnife(game, game.get_knife_pose()[1], 0);
   }
 
   /**
@@ -83,7 +83,7 @@ export class Scene {
    * rolls along the line it rests on without slipping, as a mezzaluna rocks through a cut.
    */
   placeKnife(game: Game, lowerM: number, rockRad: number): void {
-    const f = game.knife_frame();
+    const f = game.get_knife_frame();
     const edge = new THREE.Vector3(f[0], f[1], f[2]);
     const down = new THREE.Vector3(f[3], f[4], f[5]);
     const up = down.clone().negate();
@@ -104,7 +104,7 @@ export class Scene {
    * buffer, which works for any closed mesh without building cap geometry.
    */
   showHalves(game: Game): void {
-    const f = game.knife_frame();
+    const f = game.get_knife_frame();
     const normal = new THREE.Vector3(f[6], f[7], f[8]);
     const geometry = buildCakeGeometry(game);
     this.halfGap.snap(0);
@@ -151,13 +151,16 @@ export class Scene {
       half.clip.projectPoint(this.cake.position.clone().add(half.group.position), half.cap.position);
       half.cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), half.offset.clone().negate());
     }
-    const canvas = this.renderer.domElement;
-    if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-      this.renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
-      this.camera.aspect = canvas.clientWidth / canvas.clientHeight;
-      this.camera.updateProjectionMatrix();
-    }
+    this.fitCanvas();
     this.renderer.render(this.scene, this.camera);
+  }
+
+  private fitCanvas(): void {
+    const canvas = this.renderer.domElement;
+    if (canvas.width === canvas.clientWidth && canvas.height === canvas.clientHeight) return;
+    this.renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+    this.camera.aspect = canvas.clientWidth / canvas.clientHeight;
+    this.camera.updateProjectionMatrix();
   }
 
   /** A warm key light low enough to the side that it is plainly not overhead, and a cool unshadowed fill from the far side. */
@@ -200,13 +203,9 @@ export class Scene {
   private buildStand(): void {
     const layout = this.layout;
     const ceramic = new THREE.MeshStandardMaterial({ color: 0xf2efe8, roughness: 0.35 });
-    const columnTopM = layout.stand_top_y_m - layout.stand_plate_thickness_m;
-    const parts: [number, number, number][] = [
-      [layout.stand_radius_m, columnTopM, layout.stand_top_y_m],
-      [layout.stand_column_radius_m, layout.stand_base_thickness_m, columnTopM],
-      [layout.stand_base_radius_m, 0, layout.stand_base_thickness_m],
-    ];
-    for (const [radiusM, y0M, y1M] of parts) {
+    const parts = get_stand_parts();
+    for (let i = 0; i < parts.length; i += 3) {
+      const [radiusM, y0M, y1M] = parts.slice(i, i + 3);
       const part = new THREE.Mesh(new THREE.CylinderGeometry(radiusM, radiusM, y1M - y0M, 64).translate(0, (y0M + y1M) / 2, 0), ceramic);
       part.castShadow = true;
       part.receiveShadow = true;
@@ -218,7 +217,7 @@ export class Scene {
     for (let i = 0; i < RIM_BEAD_COUNT; i += 1) {
       const angle = (2 * Math.PI * i) / RIM_BEAD_COUNT;
       const mesh = new THREE.Mesh(bead, beadMaterial);
-      mesh.position.set(Math.cos(angle) * layout.stand_radius_m, columnTopM + layout.stand_plate_thickness_m / 2, Math.sin(angle) * layout.stand_radius_m);
+      mesh.position.set(Math.cos(angle) * layout.stand_radius_m, layout.stand_top_y_m - layout.stand_plate_thickness_m / 2, Math.sin(angle) * layout.stand_radius_m);
       this.stand.add(mesh);
     }
     this.stand.userData.pick = "stand";
@@ -287,8 +286,8 @@ function buildCapMaterial(): THREE.Material {
 
 function buildCakeGeometry(game: Game): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(game.cake_positions(), 3));
-  geometry.setIndex(new THREE.BufferAttribute(game.cake_triangles(), 1));
+  geometry.setAttribute("position", new THREE.BufferAttribute(game.get_cake_mesh_positions(), 3));
+  geometry.setIndex(new THREE.BufferAttribute(game.get_cake_mesh_triangles(), 1));
   const faceted = geometry.toNonIndexed();
   faceted.computeVertexNormals();
   return faceted;

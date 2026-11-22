@@ -71,3 +71,11 @@ pub fn calc_meters(quantized: i32) -> f64 {
 pub fn calc_radians(quantized: i32) -> f64 {
     quantized as f64 * ANGLE_UNIT_RAD
 }
+
+pub fn quantize_meters(meters: f64) -> i32 {
+    (meters / POSITION_UNIT_M).round() as i32
+}
+
+pub fn quantize_radians(radians: f64) -> i32 {
+    (radians / ANGLE_UNIT_RAD).round() as i32
+}

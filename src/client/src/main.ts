@@ -30,7 +30,7 @@ const scene = new Scene(canvas, layout);
 /** The camera orbits halfway between the resting knife's edge and the stand's plate. */
 const orbit = new Orbit(scene.camera, new THREE.Vector3(0, (layout.pivot_y_m + layout.stand_top_y_m) / 2, 0));
 let game = new Game(roundTicks);
-const controls = new Controls(scene, orbit, layout, game.knife_pose()[0]);
+const controls = new Controls(scene, orbit, layout, game.get_knife_pose()[0]);
 /** The cut in progress: when it started, the knife's travel, and the result to show once it lands. */
 let cutting: { startMs: number; fromLowerM: number; toLowerM: number; split: Float64Array } | null = null;
 let lagMs = 0;
@@ -41,14 +41,14 @@ clock.hidden = roundTicks === undefined;
 function startRound(): void {
   game.free();
   game = new Game(roundTicks);
-  controls.reset(game.knife_pose()[0]);
+  controls.reset(game.get_knife_pose()[0]);
   scene.resetCake(game);
   cutting = null;
   result.hidden = true;
 }
 
 function startCut(split: Float64Array, nowMs: number): void {
-  cutting = { startMs: nowMs, fromLowerM: game.knife_pose()[1], toLowerM: game.cut_lower_m(), split };
+  cutting = { startMs: nowMs, fromLowerM: game.get_knife_pose()[1], toLowerM: game.calc_cut_lower_m(), split };
   scene.showHalves(game);
 }
 
@@ -96,7 +96,7 @@ function onFrame(nowMs: number): void {
     scene.sync(game);
   }
   cutButton.disabled = cutting !== null || !game.is_cut_through();
-  if (roundTicks !== undefined) clock.textContent = `${Math.ceil((roundTicks - game.tick()) / layout.ticks_per_s)}`;
+  if (roundTicks !== undefined) clock.textContent = `${Math.ceil((roundTicks - game.get_tick()) / layout.ticks_per_s)}`;
   scene.render(elapsedMs / 1000);
 }
 

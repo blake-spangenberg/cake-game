@@ -73,7 +73,7 @@ impl Knife {
     }
 
     /// The edge's lowest point, the origin of the knife's local frame.
-    pub fn calc_edge_middle(&self) -> DVec3 {
+    pub(crate) fn calc_edge_middle(&self) -> DVec3 {
         PIVOT + self.calc_frame().down * self.lower_m
     }
 
@@ -89,18 +89,22 @@ impl Knife {
     /// stops where the edge meets a solid, and tilting stops where the lowered edge would enter
     /// one. The blade never pushes a solid; one rising into it raises it instead.
     pub fn step(&mut self, input: &KnifeInput, solids: &[Solid]) {
-        let lower_m = calc_meters(input.lower).max(0.0);
-        self.lower_m = lower_m.min(self.calc_lower_limit_m(solids)).max(0.0);
+        let wanted_lower_m = calc_meters(input.lower).max(0.0);
+        self.lower_toward(wanted_lower_m, solids);
         let target_tilt_rad = calc_radians(input.tilt).clamp(-MAX_TILT_RAD, MAX_TILT_RAD);
         self.tilt_rad = calc_sweep_reach(self.tilt_rad, target_tilt_rad, |tilt_rad| {
             Knife { tilt_rad, ..*self }.is_clear_of(solids)
         });
-        self.lower_m = lower_m.min(self.calc_lower_limit_m(solids)).max(0.0);
+        self.lower_toward(wanted_lower_m, solids);
+    }
+
+    fn lower_toward(&mut self, wanted_lower_m: f64, solids: &[Solid]) {
+        self.lower_m = wanted_lower_m.min(self.calc_lower_limit_m(solids)).max(0.0);
     }
 
     /// Whether the edge at its lowering stays out of every solid, give or take
     /// [`TOUCH_TOLERANCE_M`].
-    pub fn is_clear_of(&self, solids: &[Solid]) -> bool {
+    pub(crate) fn is_clear_of(&self, solids: &[Solid]) -> bool {
         self.calc_lower_limit_m(solids) >= self.lower_m - TOUCH_TOLERANCE_M
     }
 
@@ -124,7 +128,7 @@ impl Knife {
 /// How far a turn from `from_rad` toward `to_rad` gets while `is_clear` holds, stopping
 /// [`SWEEP_MARGIN_RAD`] short of where it first fails but never turning back. Sweeps in small
 /// steps and refines the first step that fails.
-pub fn calc_sweep_reach(from_rad: f64, to_rad: f64, is_clear: impl Fn(f64) -> bool) -> f64 {
+pub(crate) fn calc_sweep_reach(from_rad: f64, to_rad: f64, is_clear: impl Fn(f64) -> bool) -> f64 {
     let probe_to_rad = to_rad + SWEEP_MARGIN_RAD * (to_rad - from_rad).signum();
     let step_len = libm::ceil((probe_to_rad - from_rad).abs() / SWEEP_PROBE_RAD).max(1.0) as u32;
     let mut clear_rad = from_rad;
@@ -169,7 +173,7 @@ pub fn calc_blade_outline(edge_segments: u32) -> Vec<[f64; 2]> {
 
 /// The blade's outline on both faces, for its collider. The collider is thicker than the drawn
 /// blade so a carried cake cannot pass through it between ticks.
-pub fn build_blade_hull() -> Vec<Vec3> {
+pub(crate) fn build_blade_hull() -> Vec<Vec3> {
     let half_thickness_m = BLADE_COLLIDER_THICKNESS_M / 2.0;
     calc_blade_outline(BLADE_HULL_SEGMENTS)
         .into_iter()

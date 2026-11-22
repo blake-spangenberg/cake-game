@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type { Game, Layout } from "@wasm/cake_wasm.js";
 import type { Orbit } from "./orbit";
-import type { Scene } from "./scene";
+import type { PickKind, Scene } from "./scene";
 import { Spring } from "./spring";
 
 type Drag =
@@ -36,7 +36,7 @@ export class Controls {
   private drag: Drag | null = null;
   private readonly lastPx = new THREE.Vector2();
   private readonly raycaster = new THREE.Raycaster();
-  private readonly tilt: Spring;
+  private readonly tilt = new Spring(0, KNIFE_HALF_LIFE_S);
   private readonly lower = new Spring(0, KNIFE_RETURN_HALF_LIFE_S);
   /** The tilt and lowering last sent, to tell a knife stopped by a solid from one still easing. */
   private sentTiltRad = 0;
@@ -51,8 +51,7 @@ export class Controls {
     private readonly layout: Layout,
     knifeTiltRad: number,
   ) {
-    this.tilt = new Spring(knifeTiltRad, KNIFE_HALF_LIFE_S);
-    this.sentTiltRad = knifeTiltRad;
+    this.reset(knifeTiltRad);
     const canvas = scene.renderer.domElement;
     canvas.addEventListener("pointerdown", (event) => this.onPointerDown(event));
     canvas.addEventListener("pointermove", (event) => this.onPointerMove(event));
@@ -84,10 +83,10 @@ export class Controls {
    */
   stepInput(game: Game): Int32Array {
     const dtS = 1 / this.layout.ticks_per_s;
-    const [knifeTiltRad, knifeLowerM] = game.knife_pose();
+    const [knifeTiltRad, knifeLowerM] = game.get_knife_pose();
     if (Math.abs(knifeTiltRad - this.sentTiltRad) > this.layout.angle_unit_rad / 2) this.tilt.snap(knifeTiltRad);
     if (knifeLowerM < this.sentLowerM - this.layout.position_unit_m / 2) this.lower.capAt(knifeLowerM + LOWER_SLACK_M);
-    if (game.is_stand_blocked()) this.stand.snap(game.stand_angle_rad());
+    if (game.is_stand_blocked()) this.stand.snap(game.get_stand_angle_rad());
     const encoded = new Int32Array(ENCODED_LEN);
     const [handX, handZ] = [this.handX.step(dtS), this.handZ.step(dtS)];
     if (this.drag?.kind === "cake") {
@@ -212,7 +211,7 @@ export class Controls {
     return to.clone().project(camera).x >= from.clone().project(camera).x ? 1 : -1;
   }
 
-  private updateCursor(kind: string | null): void {
+  private updateCursor(kind: PickKind | null): void {
     const isDragging = this.drag !== null && this.drag.kind !== "camera";
     this.scene.renderer.domElement.style.cursor = isDragging ? "grabbing" : kind ? "grab" : "default";
   }

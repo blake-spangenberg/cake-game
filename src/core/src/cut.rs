@@ -31,7 +31,7 @@ impl Split {
 }
 
 /// Whether the plane passes between the points, rather than leaving them all on one side.
-pub fn is_crossing(positions: &[DVec3], plane: &Plane) -> bool {
+pub(crate) fn is_crossing(positions: &[DVec3], plane: &Plane) -> bool {
     let mut distances = positions.iter().map(|p| (p - plane.point).dot(plane.normal));
     let Some(first) = distances.next() else {
         return false;
@@ -54,7 +54,7 @@ pub fn calc_split(positions: &[DVec3], triangles: &[[u32; 3]], plane: &Plane) ->
 }
 
 /// Calls `on_segment` with each segment where a triangle crosses the plane, in world coordinates.
-pub fn for_each_section_segment(
+pub(crate) fn for_each_section_segment(
     positions: &[DVec3],
     triangles: &[[u32; 3]],
     plane: &Plane,

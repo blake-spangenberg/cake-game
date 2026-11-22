@@ -9,8 +9,7 @@ use cake_core::knife::{
 use cake_core::replay::{build_scripted_inputs, replay};
 use cake_core::sim::{Phase, ROUND_TICKS, TICKS_PER_S, World};
 use cake_core::table::{
-    PIVOT, STAND_BASE_RADIUS_M, STAND_BASE_THICKNESS_M, STAND_COLUMN_RADIUS_M, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M,
-    STAND_TOP_Y_M, TABLE_HALF_X_M, TABLE_HALF_Z_M,
+    PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M, TABLE_HALF_X_M, TABLE_HALF_Z_M,
 };
 use cake_core::{cut::DENSITY_G_PER_M3, cut::Split, input};
 use wasm_bindgen::prelude::*;
@@ -30,9 +29,6 @@ pub struct Layout {
     pub stand_radius_m: f64,
     pub stand_top_y_m: f64,
     pub stand_plate_thickness_m: f64,
-    pub stand_column_radius_m: f64,
-    pub stand_base_radius_m: f64,
-    pub stand_base_thickness_m: f64,
     pub pivot_y_m: f64,
     pub blade_arc_radius_m: f64,
     pub blade_half_span_m: f64,
@@ -56,9 +52,6 @@ pub fn get_layout() -> Layout {
         stand_radius_m: STAND_RADIUS_M,
         stand_top_y_m: STAND_TOP_Y_M,
         stand_plate_thickness_m: STAND_PLATE_THICKNESS_M,
-        stand_column_radius_m: STAND_COLUMN_RADIUS_M,
-        stand_base_radius_m: STAND_BASE_RADIUS_M,
-        stand_base_thickness_m: STAND_BASE_THICKNESS_M,
         pivot_y_m: PIVOT.y,
         blade_arc_radius_m: BLADE_ARC_RADIUS_M,
         blade_half_span_m: BLADE_HALF_SPAN_M,
@@ -73,6 +66,12 @@ pub fn get_layout() -> Layout {
         round_ticks: ROUND_TICKS,
         density_g_per_m3: DENSITY_G_PER_M3,
     }
+}
+
+/// The stand's cylinders from top to bottom as flattened `(radius, y0, y1)` triples, meters.
+#[wasm_bindgen]
+pub fn get_stand_parts() -> Vec<f64> {
+    STAND_PARTS.iter().flat_map(|part| [part.radius_m, part.y0_m, part.y1_m]).collect()
 }
 
 /// The blade's outline in the knife's local frame as flattened `(x, y)` pairs, meters.
@@ -127,25 +126,25 @@ impl Game {
     }
 
     /// How far the knife lowers through the cake when it cuts, in meters.
-    pub fn cut_lower_m(&self) -> f64 {
+    pub fn calc_cut_lower_m(&self) -> f64 {
         self.world.calc_cut_lower_m()
     }
 
-    pub fn tick(&self) -> u32 {
+    pub fn get_tick(&self) -> u32 {
         self.world.get_tick()
     }
 
-    pub fn hash(&self) -> u64 {
+    pub fn calc_hash(&self) -> u64 {
         self.world.calc_hash()
     }
 
     /// Translation then rotation quaternion: x, y, z, qx, qy, qz, qw.
-    pub fn cake_pose(&self) -> Vec<f32> {
+    pub fn get_cake_pose(&self) -> Vec<f32> {
         let pose = self.world.get_cake_pose();
         pose.translation.to_array().into_iter().chain(pose.rotation.to_array()).collect()
     }
 
-    pub fn stand_angle_rad(&self) -> f64 {
+    pub fn get_stand_angle_rad(&self) -> f64 {
         self.world.get_stand_angle_rad()
     }
 
@@ -155,24 +154,24 @@ impl Game {
     }
 
     /// Tilt in radians, then lowering in meters.
-    pub fn knife_pose(&self) -> Vec<f64> {
+    pub fn get_knife_pose(&self) -> Vec<f64> {
         let knife = self.world.get_knife();
         vec![knife.tilt_rad, knife.lower_m]
     }
 
     /// The knife's unit edge, down, and normal vectors, flattened.
-    pub fn knife_frame(&self) -> Vec<f64> {
+    pub fn get_knife_frame(&self) -> Vec<f64> {
         let frame = self.world.get_knife().calc_frame();
         [frame.edge, frame.down, frame.normal].iter().flat_map(|v| v.to_array()).collect()
     }
 
     /// The cake mesh's local vertex positions, flattened.
-    pub fn cake_positions(&self) -> Vec<f32> {
+    pub fn get_cake_mesh_positions(&self) -> Vec<f32> {
         self.world.get_model().mesh.positions.iter().flat_map(|p| p.to_array()).collect()
     }
 
     /// The cake mesh's triangles as vertex indices, flattened.
-    pub fn cake_triangles(&self) -> Vec<u32> {
+    pub fn get_cake_mesh_triangles(&self) -> Vec<u32> {
         self.world.get_model().mesh.triangles.iter().flatten().copied().collect()
     }
 }

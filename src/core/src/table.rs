@@ -10,9 +10,28 @@ pub const TABLE_HALF_Z_M: f64 = 0.5;
 pub const STAND_RADIUS_M: f64 = 0.18;
 pub const STAND_TOP_Y_M: f64 = 0.12;
 pub const STAND_PLATE_THICKNESS_M: f64 = 0.012;
-pub const STAND_COLUMN_RADIUS_M: f64 = 0.03;
-pub const STAND_BASE_RADIUS_M: f64 = 0.09;
-pub const STAND_BASE_THICKNESS_M: f64 = 0.012;
+const STAND_COLUMN_RADIUS_M: f64 = 0.03;
+const STAND_BASE_RADIUS_M: f64 = 0.09;
+const STAND_BASE_THICKNESS_M: f64 = 0.012;
+
+/// A cylinder of the stand, centered on its axis, from `y0_m` up to `y1_m`.
+#[derive(Clone, Copy, Debug)]
+pub struct StandPart {
+    pub radius_m: f64,
+    pub y0_m: f64,
+    pub y1_m: f64,
+}
+
+/// The stand's plate, column, and base, from top to bottom.
+pub const STAND_PARTS: [StandPart; 3] = [
+    StandPart { radius_m: STAND_RADIUS_M, y0_m: STAND_TOP_Y_M - STAND_PLATE_THICKNESS_M, y1_m: STAND_TOP_Y_M },
+    StandPart {
+        radius_m: STAND_COLUMN_RADIUS_M,
+        y0_m: STAND_BASE_THICKNESS_M,
+        y1_m: STAND_TOP_Y_M - STAND_PLATE_THICKNESS_M,
+    },
+    StandPart { radius_m: STAND_BASE_RADIUS_M, y0_m: 0.0, y1_m: STAND_BASE_THICKNESS_M },
+];
 /// The longest any cake measures in any direction, so no resting pose stands taller.
 pub const MAX_CAKE_EXTENT_M: f64 = 0.25;
 /// The point every cut plane passes through, just above the tallest a cake on the stand can be,

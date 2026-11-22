@@ -3,7 +3,7 @@
 //! for tuning against rolling away and wobbling forever.
 
 use cake_core::cakes::build_slice_missing_cake;
-use cake_core::input::{HandInput, Input, KnifeInput, POSITION_UNIT_M};
+use cake_core::input::{HandInput, Input, KnifeInput, quantize_meters};
 use cake_core::knife::START_KNIFE;
 use cake_core::sim::{TICKS_PER_S, World};
 use cake_core::table::CAKE_SPAWN;
@@ -22,7 +22,7 @@ fn main() {
     let (mut worst_roll_m, mut worst_settle_s) = (0.0_f32, 0.0_f32);
     for local in model.mesh.positions.iter().step_by(GRAB_STRIDE) {
         let grab = [CAKE_SPAWN.x as f32 + local.x, local.y, CAKE_SPAWN.z as f32 + local.z];
-        let grab_at = grab.map(|m| (m as f64 / POSITION_UNIT_M).round() as i32);
+        let grab_at = grab.map(|m| quantize_meters(m as f64));
         let target_xz = [grab_at[0], grab_at[2]];
         let knife = KnifeInput { tilt: 0, lower: 0 };
         let mut world = World::create(model.clone(), START_KNIFE, None);
