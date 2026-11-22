@@ -5,7 +5,9 @@ use rapier3d::prelude::*;
 use crate::cakes::CakeModel;
 use crate::cut::{DENSITY_G_PER_M3, Split, calc_split, is_crossing};
 use crate::input::{HandInput, Input, KnifeInput, calc_meters, calc_radians};
-use crate::knife::{HANDLE_LEN_M, HANDLE_RADIUS_M, Knife, Solid, build_blade_hull, calc_handle_centers};
+use crate::knife::{
+    HANDLE_LEN_M, HANDLE_RADIUS_M, Knife, Solid, build_blade_hull, calc_handle_centers, calc_sweep_reach,
+};
 use crate::mesh::{Mesh, calc_arc_outline};
 use crate::table::{
     CAKE_SPAWN, RESPAWN_BELOW_Y_M, STAND_BASE_RADIUS_M, STAND_BASE_THICKNESS_M, STAND_COLUMN_RADIUS_M,
@@ -21,12 +23,21 @@ const DT_S: f64 = 1.0 / TICKS_PER_S as f64;
 const LENGTH_UNIT_M: f32 = 0.1;
 const HAND_SPEED_M_PER_S: f64 = 1.5;
 /// Fraction of the remaining distance the hand covers each tick, easing it into its target.
-const HAND_EASE_PER_TICK: f64 = 0.2;
-/// How far a carried cake's lowest point clears the table or stand beneath it.
-const CARRY_CLEARANCE_M: f64 = 0.02;
-/// Across this gap between a carried cake and the stand's rim, the height it clears blends from
-/// the table's to the stand's.
-const STAND_APPROACH_M: f64 = 0.15;
+const HAND_EASE_PER_TICK: f64 = 0.1;
+/// How far a carried cake's lowest point clears the surface beneath it, as a stand pickup lifts
+/// it.
+const CARRY_CLEARANCE_M: f64 = 0.01;
+/// Across this gap between a carried cake and the stand's rim, most of the table, the height it
+/// clears eases from the table's up to the stand's.
+const STAND_APPROACH_M: f64 = 0.5;
+/// How high the hand lifts a cake grabbed while resting on the stand, so the plate still bears
+/// its far side and a gentle slide keeps its orientation.
+const STAND_LIFT_M: f64 = 0.01;
+/// How near the plate a cake's lowest point must be for a grab to count as taking it off the
+/// stand.
+const ON_STAND_TOLERANCE_M: f64 = 0.01;
+/// How long a cake that fell off the table keeps falling before it respawns.
+const RESPAWN_DELAY_TICKS: u32 = 3 * TICKS_PER_S;
 const STAND_SPEED_RAD_PER_S: f64 = core::f64::consts::TAU;
 /// Slack around the cake's bounding sphere within which a grab point is accepted.
 const GRAB_TOLERANCE_M: f64 = 0.005;
@@ -40,8 +51,8 @@ const CAKE_FRICTION: f32 = 0.9;
 /// gravity keeps driving, it stops an off-balance cake rocking or rolling on its rim outright,
 /// while tipping over still outpaces it.
 const ROLL_RESISTANCE_RAD_PER_S2: f32 = 80.0;
-/// Gap a carried cake keeps from the knife when its hand is stopped short.
-const KNIFE_CLEARANCE_M: f32 = 0.002;
+/// Gap a carried cake keeps from the knife, stand, or table when its hand is stopped short.
+const HAND_SWEEP_CLEARANCE_M: f32 = 0.002;
 const STAND_SEGMENTS: u32 = 48;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,6 +64,8 @@ pub enum Phase {
 struct Grip {
     joint: ImpulseJointHandle,
     grab_at: [i32; 3],
+    /// The hand's height while a cake taken off the stand still reaches over it.
+    stand_hold_y_m: Option<f64>,
 }
 
 /// One player's cake, hand, stand, and knife on the shared table, advanced one fixed tick per
@@ -66,6 +79,8 @@ pub struct World {
     grip: Option<Grip>,
     stand: RigidBodyHandle,
     stand_angle_rad: f64,
+    /// Whether the knife stopped the stand short of its input last tick.
+    is_stand_blocked: bool,
     stand_plate_positions: Vec<DVec3>,
     stand_plate_triangles: Vec<[u32; 3]>,
     knife_body: RigidBodyHandle,
@@ -73,6 +88,8 @@ pub struct World {
     model: CakeModel,
     bounding_radius_m: f64,
     cake_positions: Vec<DVec3>,
+    /// Ticks since the cake fell off the table.
+    fallen_ticks: u32,
     knife: Knife,
     tick: u32,
     round_ticks: Option<u32>,
@@ -114,6 +131,7 @@ impl World {
             grip: None,
             stand,
             stand_angle_rad: 0.0,
+            is_stand_blocked: false,
             stand_plate_positions: plate.positions.iter().map(|p| p.as_dvec3()).collect(),
             stand_plate_triangles: plate.triangles,
             knife_body,
@@ -121,6 +139,7 @@ impl World {
             model,
             bounding_radius_m,
             cake_positions: Vec::new(),
+            fallen_ticks: 0,
             knife,
             tick: 0,
             round_ticks,
@@ -192,6 +211,12 @@ impl World {
         self.stand_angle_rad
     }
 
+    /// Whether the knife stopped the stand short of its input last tick, for the client to stop
+    /// the drag there too.
+    pub fn is_stand_blocked(&self) -> bool {
+        self.is_stand_blocked
+    }
+
     pub fn is_holding(&self) -> bool {
         self.grip.is_some()
     }
@@ -220,6 +245,7 @@ impl World {
         for value in [self.knife.tilt_rad, self.knife.lower_m, self.stand_angle_rad] {
             hash.write(&value.to_bits().to_le_bytes());
         }
+        hash.write(&self.fallen_ticks.to_le_bytes());
         hash.finish()
     }
 
@@ -237,31 +263,67 @@ impl World {
             self.release();
             self.try_grab(hand_input.grab_at);
         }
-        if self.grip.is_none() {
+        let Some(target_y_m) = self.calc_hand_target_y_m() else {
             return;
-        }
+        };
         let target_xz = hand_input.target_xz.map(calc_meters);
-        let lowest_y_m = self.cake_positions.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-        let hand_y_m = self.physics.bodies[self.hand].translation().y as f64;
         let target = DVec3::new(
             target_xz[0].clamp(-TABLE_HALF_X_M, TABLE_HALF_X_M),
-            hand_y_m + self.calc_support_y_m() + CARRY_CLEARANCE_M - lowest_y_m,
+            target_y_m,
             target_xz[1].clamp(-TABLE_HALF_Z_M, TABLE_HALF_Z_M),
         );
         self.move_hand_toward(target);
     }
 
-    /// Height of the surface beneath the cake: the stand's top where the cake's bounding box
-    /// reaches over the stand, the table's well away from it, and a blend between.
+    /// Height the hand steers to, or none with no grip. A cake taken off the stand is held just
+    /// above where it was grabbed until it no longer reaches over the stand, and from then on is
+    /// carried with its lowest point just clear of the surface beneath, eased up toward the
+    /// stand's top as it nears.
+    fn calc_hand_target_y_m(&mut self) -> Option<f64> {
+        let is_over_stand = self.is_over_stand();
+        let grip = self.grip.as_mut()?;
+        if !is_over_stand {
+            grip.stand_hold_y_m = None;
+        }
+        if let Some(hold_y_m) = grip.stand_hold_y_m {
+            return Some(hold_y_m);
+        }
+        let hand_y_m = self.physics.bodies[self.hand].translation().y as f64;
+        Some(hand_y_m + self.calc_support_y_m() + CARRY_CLEARANCE_M - self.calc_lowest_y_m())
+    }
+
+    /// Height of the surface beneath the cake: the stand's top where its bounding box reaches over
+    /// the stand, easing down along an S curve to the table's [`STAND_APPROACH_M`] away.
     fn calc_support_y_m(&self) -> f64 {
+        let nearness = (1.0 - self.calc_stand_gap_m() / STAND_APPROACH_M).clamp(0.0, 1.0);
+        STAND_TOP_Y_M * nearness * nearness * (3.0 - 2.0 * nearness)
+    }
+
+    fn calc_lowest_y_m(&self) -> f64 {
+        self.cake_positions.iter().map(|p| p.y).fold(f64::INFINITY, f64::min)
+    }
+
+    /// Whether the cake sits on the stand's plate, judged by its shape rather than its contacts,
+    /// which a sleeping cake does not report.
+    fn is_on_stand(&self) -> bool {
+        self.is_over_stand() && (self.calc_lowest_y_m() - STAND_TOP_Y_M).abs() < ON_STAND_TOLERANCE_M
+    }
+
+    /// Whether the cake's bounding box reaches over the stand's plate.
+    fn is_over_stand(&self) -> bool {
+        self.calc_stand_gap_m() <= 0.0
+    }
+
+    /// How far the cake's bounding box lies outside the stand's rim, seen from above, or a
+    /// negative amount where it reaches over the plate.
+    fn calc_stand_gap_m(&self) -> f64 {
         let (mut min, mut max) = (DVec3::INFINITY, DVec3::NEG_INFINITY);
         for p in &self.cake_positions {
             (min, max) = (min.min(*p), max.max(*p));
         }
         let nearest_x_m = 0.0_f64.clamp(min.x, max.x);
         let nearest_z_m = 0.0_f64.clamp(min.z, max.z);
-        let gap_m = libm::sqrt(nearest_x_m * nearest_x_m + nearest_z_m * nearest_z_m) - STAND_RADIUS_M;
-        STAND_TOP_Y_M * (1.0 - gap_m / STAND_APPROACH_M).clamp(0.0, 1.0)
+        libm::sqrt(nearest_x_m * nearest_x_m + nearest_z_m * nearest_z_m) - STAND_RADIUS_M
     }
 
     /// Grabs at `grab_at`, ignored where it lies beyond the cake, since a client may send any
@@ -281,7 +343,8 @@ impl World {
         let joint = self.physics.insert_impulse_joint(self.hand, self.cake, joint);
         set_damping(&mut self.physics.bodies[self.cake], HELD_LINEAR_DAMPING, HELD_ANGULAR_DAMPING);
         self.set_knife_solid(true);
-        self.grip = Some(Grip { joint, grab_at });
+        let stand_hold_y_m = self.is_on_stand().then_some(point.y + STAND_LIFT_M);
+        self.grip = Some(Grip { joint, grab_at, stand_hold_y_m });
     }
 
     fn release(&mut self) {
@@ -342,17 +405,15 @@ impl World {
         self.set_hand_next(from + step);
     }
 
-    /// Moves the hand next tick, stopping the carried cake at the knife and sliding it along the
-    /// blade. The rigid grip would otherwise drag the cake through the thin blade, since a
-    /// kinematic hand outmuscles any contact.
+    /// Moves the hand next tick, stopping the carried cake at the knife, stand, or table and
+    /// sliding it along them. The rigid grip would otherwise drag the cake into them, through
+    /// the thin blade or clipping into the stand, since a kinematic hand outmuscles any contact.
     fn set_hand_next(&mut self, to: DVec3) {
         let from = self.physics.bodies[self.hand].translation().as_dvec3();
         let step = (to - from).as_vec3();
-        let knife_colliders = &self.knife_colliders;
-        let is_knife = |collider: ColliderHandle, _: &Collider| knife_colliders.contains(&collider);
         let options = ShapeCastOptions {
             max_time_of_impact: 1.0,
-            target_distance: KNIFE_CLEARANCE_M,
+            target_distance: HAND_SWEEP_CLEARANCE_M,
             stop_at_penetration: false,
             compute_impact_geometry_on_penetration: true,
         };
@@ -362,7 +423,7 @@ impl World {
             step,
             &*self.cake_shape,
             options,
-            QueryFilter::new().predicate(&is_knife),
+            QueryFilter::new().exclude_rigid_body(self.cake),
         );
         let step = match hit {
             None => step,
@@ -377,10 +438,40 @@ impl World {
 
     fn step_stand(&mut self, stand_angle: i32) {
         let max_step_rad = STAND_SPEED_RAD_PER_S * DT_S;
-        self.stand_angle_rad += (calc_radians(stand_angle) - self.stand_angle_rad).clamp(-max_step_rad, max_step_rad);
+        let step_rad = (calc_radians(stand_angle) - self.stand_angle_rad).clamp(-max_step_rad, max_step_rad);
+        let wanted_rad = self.stand_angle_rad + step_rad;
+        self.stand_angle_rad = self.calc_stand_reach_rad(wanted_rad);
+        self.is_stand_blocked = self.stand_angle_rad != wanted_rad;
+        if self.is_stand_blocked {
+            // The knife holds the cake, which would otherwise spin on into the blade.
+            let cake = &mut self.physics.bodies[self.cake];
+            cake.set_linvel(Vector::ZERO, true);
+            cake.set_angvel(Vector::ZERO, true);
+        }
         let half_rad = self.stand_angle_rad / 2.0;
         let rotation = Rotation::from_xyzw(0.0, libm::sin(half_rad) as f32, 0.0, libm::cos(half_rad) as f32);
         self.physics.bodies[self.stand].set_next_kinematic_rotation(rotation);
+    }
+
+    /// How far the stand turns toward `to_rad` before the cake riding it would meet the lowered
+    /// knife.
+    fn calc_stand_reach_rad(&self, to_rad: f64) -> f64 {
+        let is_riding = self.grip.is_none() && self.is_on_stand();
+        if !is_riding || self.knife.lower_m == 0.0 {
+            return to_rad;
+        }
+        let from_rad = self.stand_angle_rad;
+        let plate = self.get_stand_plate();
+        calc_sweep_reach(from_rad, to_rad, |rad| {
+            let (sin, cos) = (libm::sin(rad - from_rad), libm::cos(rad - from_rad));
+            let turned: Vec<DVec3> = self
+                .cake_positions
+                .iter()
+                .map(|p| DVec3::new(p.x * cos + p.z * sin, p.y, p.z * cos - p.x * sin))
+                .collect();
+            let cake = Solid { positions: &turned, triangles: &self.model.mesh.triangles };
+            self.knife.is_clear_of(&[cake, plate])
+        })
     }
 
     fn step_knife(&mut self, input: &KnifeInput) {
@@ -393,11 +484,16 @@ impl World {
         self.physics.bodies[self.knife_body].set_next_kinematic_position(pose);
     }
 
-    /// Respawns a cake that fell off the table.
+    /// Respawns a cake that fell off the table, once it has fallen for a while.
     fn ensure_cake_on_table(&mut self) {
         if self.physics.bodies[self.cake].translation().y as f64 >= RESPAWN_BELOW_Y_M {
             return;
         }
+        self.fallen_ticks += 1;
+        if self.fallen_ticks < RESPAWN_DELAY_TICKS {
+            return;
+        }
+        self.fallen_ticks = 0;
         self.release();
         let cake = &mut self.physics.bodies[self.cake];
         cake.set_position(Pose::from_translation(CAKE_SPAWN.as_vec3()), true);

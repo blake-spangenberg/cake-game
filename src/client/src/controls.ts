@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { Layout } from "@wasm/cake_wasm.js";
+import type { Game, Layout } from "@wasm/cake_wasm.js";
 import type { Orbit } from "./orbit";
 import type { Scene } from "./scene";
 import { Spring } from "./spring";
@@ -8,16 +8,17 @@ type Drag =
   | { kind: "camera" }
   | { kind: "cake"; grabAt: [number, number, number]; metersPerPx: number }
   | { kind: "knife"; tiltSign: number }
-  | { kind: "stand"; turnSign: number };
+  | { kind: "stand"; axisPx: THREE.Vector2; lastBearingRad: number; turnSign: number };
 
 const FLAG_HOLDING = 1 << 0;
 const ENCODED_LEN = 9;
 const TILT_RAD_PER_PX = 0.004;
-const LOWER_M_PER_PX = 0.0036;
-const STAND_RAD_PER_PX = 0.008;
+const LOWER_M_PER_PX = 0.0018;
+/** Mouse travel this near the stand's axis on screen gives no clear bearing, so it is ignored. */
+const STAND_DEAD_ZONE_PX = 12;
 /** How far the knife may be pressed past where it stopped, so drawing back raises it at once. */
 const LOWER_SLACK_M = 0.005;
-const HAND_HALF_LIFE_S = 0.04;
+const HAND_HALF_LIFE_S = 0.08;
 const KNIFE_HALF_LIFE_S = 0.05;
 const KNIFE_RETURN_HALF_LIFE_S = 0.3;
 const STAND_HALF_LIFE_S = 0.08;
@@ -27,8 +28,9 @@ const PROBE_STEP = 0.01;
 /**
  * Turns mouse drags into the core's per-tick input. Every drag moves its object by how far the
  * mouse travels from where it pressed, never toward the cursor: drag the cake to carry it, the
- * knife to tilt (sideways) and lower it (up and down), the stand to turn it, and anywhere else to
- * swing the camera. Every input eases through a spring.
+ * knife to tilt (sideways) and lower it (up and down), the stand to turn it by circling its axis,
+ * and anywhere else to swing the camera. Every input eases through a
+ * spring, and a drag stops where the core stops its object.
  */
 export class Controls {
   private drag: Drag | null = null;
@@ -36,6 +38,9 @@ export class Controls {
   private readonly raycaster = new THREE.Raycaster();
   private readonly tilt: Spring;
   private readonly lower = new Spring(0, KNIFE_RETURN_HALF_LIFE_S);
+  /** The tilt and lowering last sent, to tell a knife stopped by a solid from one still easing. */
+  private sentTiltRad = 0;
+  private sentLowerM = 0;
   private readonly stand = new Spring(0, STAND_HALF_LIFE_S);
   private readonly handX = new Spring(0, HAND_HALF_LIFE_S);
   private readonly handZ = new Spring(0, HAND_HALF_LIFE_S);
@@ -47,6 +52,7 @@ export class Controls {
     knifeTiltRad: number,
   ) {
     this.tilt = new Spring(knifeTiltRad, KNIFE_HALF_LIFE_S);
+    this.sentTiltRad = knifeTiltRad;
     const canvas = scene.renderer.domElement;
     canvas.addEventListener("pointerdown", (event) => this.onPointerDown(event));
     canvas.addEventListener("pointermove", (event) => this.onPointerMove(event));
@@ -66,17 +72,22 @@ export class Controls {
   reset(knifeTiltRad: number): void {
     this.drag = null;
     this.tilt.snap(knifeTiltRad);
+    this.sentTiltRad = knifeTiltRad;
     this.lower.snap(0);
+    this.sentLowerM = 0;
     this.stand.snap(0);
   }
 
   /**
    * Eases every input one tick and returns it in the core's wire format, `Input::encode` in
-   * `src/core/src/input.rs`. `knifeLowerM` is where the knife stopped last tick.
+   * `src/core/src/input.rs`. A control the core stopped short last tick stops there.
    */
-  stepInput(knifeLowerM: number): Int32Array {
+  stepInput(game: Game): Int32Array {
     const dtS = 1 / this.layout.ticks_per_s;
-    this.lower.target = Math.min(this.lower.target, knifeLowerM + LOWER_SLACK_M);
+    const [knifeTiltRad, knifeLowerM] = game.knife_pose();
+    if (Math.abs(knifeTiltRad - this.sentTiltRad) > this.layout.angle_unit_rad / 2) this.tilt.snap(knifeTiltRad);
+    if (knifeLowerM < this.sentLowerM - this.layout.position_unit_m / 2) this.lower.capAt(knifeLowerM + LOWER_SLACK_M);
+    if (game.is_stand_blocked()) this.stand.snap(game.stand_angle_rad());
     const encoded = new Int32Array(ENCODED_LEN);
     const [handX, handZ] = [this.handX.step(dtS), this.handZ.step(dtS)];
     if (this.drag?.kind === "cake") {
@@ -85,7 +96,9 @@ export class Controls {
       encoded.set([this.quantizeM(handX), this.quantizeM(handZ)], 4);
     }
     encoded[6] = this.quantizeRad(this.tilt.step(dtS));
+    this.sentTiltRad = encoded[6] * this.layout.angle_unit_rad;
     encoded[7] = this.quantizeM(this.lower.step(dtS));
+    this.sentLowerM = encoded[7] * this.layout.position_unit_m;
     encoded[8] = this.quantizeRad(this.stand.step(dtS));
     return encoded;
   }
@@ -103,7 +116,9 @@ export class Controls {
       this.lower.halfLifeS = KNIFE_HALF_LIFE_S;
       this.drag = { kind: "knife", tiltSign: this.calcTiltSign() };
     } else if (hit?.kind === "stand") {
-      this.drag = { kind: "stand", turnSign: this.calcTurnSign() };
+      const axisPx = this.toClientPx(new THREE.Vector3(0, hit.point.y, 0));
+      const lastBearingRad = calcBearingRad(axisPx, this.lastPx);
+      this.drag = { kind: "stand", axisPx, lastBearingRad, turnSign: this.calcTurnSign(hit.point, axisPx) };
     } else {
       this.drag = { kind: "camera" };
     }
@@ -132,7 +147,7 @@ export class Controls {
       this.tilt.target = THREE.MathUtils.clamp(this.tilt.target + drag.tiltSign * dxPx * TILT_RAD_PER_PX, -maxTilt, maxTilt);
       this.lower.target = THREE.MathUtils.clamp(this.lower.target + dyPx * LOWER_M_PER_PX, 0, this.layout.pivot_y_m);
     } else {
-      this.stand.target += drag.turnSign * dxPx * STAND_RAD_PER_PX;
+      this.turnStand(drag);
     }
   }
 
@@ -160,12 +175,35 @@ export class Controls {
     return this.calcScreenDirection(handleAt(this.tilt.value), handleAt(this.tilt.value + PROBE_STEP));
   }
 
-  /** Which way the stand turns for its rim nearest the camera to follow the mouse rightward. */
-  private calcTurnSign(): number {
+  /**
+   * Turns the stand by how far the mouse swept around the stand's axis on screen, so circling the
+   * axis keeps turning it one way and the grabbed point roughly follows the mouse.
+   */
+  private turnStand(drag: Extract<Drag, { kind: "stand" }>): void {
+    if (this.lastPx.distanceTo(drag.axisPx) < STAND_DEAD_ZONE_PX) return;
+    const bearingRad = calcBearingRad(drag.axisPx, this.lastPx);
+    const sweptRad = Math.atan2(Math.sin(bearingRad - drag.lastBearingRad), Math.cos(bearingRad - drag.lastBearingRad));
+    drag.lastBearingRad = bearingRad;
+    this.stand.target += drag.turnSign * sweptRad;
+  }
+
+  /**
+   * +1 where turning the stand sweeps the grabbed point the same way around the axis on screen
+   * as a growing bearing, else -1. A grab on the axis takes the rim nearest the camera.
+   */
+  private calcTurnSign(point: THREE.Vector3, axisPx: THREE.Vector2): number {
     const camera = this.scene.camera.position;
-    const rim = new THREE.Vector3(camera.x, 0, camera.z).setLength(this.layout.stand_radius_m).setY(this.layout.stand_top_y_m);
+    const bearing = point.x * point.x + point.z * point.z > 1e-8 ? point : camera;
+    const rim = new THREE.Vector3(bearing.x, 0, bearing.z).setLength(this.layout.stand_radius_m).setY(point.y);
     const turned = rim.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), PROBE_STEP);
-    return this.calcScreenDirection(rim, turned);
+    const [from, to] = [rim, turned].map((p) => calcBearingRad(axisPx, this.toClientPx(p)));
+    return Math.sin(to - from) >= 0 ? 1 : -1;
+  }
+
+  private toClientPx(point: THREE.Vector3): THREE.Vector2 {
+    const ndc = point.clone().project(this.scene.camera);
+    const rect = this.scene.renderer.domElement.getBoundingClientRect();
+    return new THREE.Vector2(rect.left + ((ndc.x + 1) / 2) * rect.width, rect.top + ((1 - ndc.y) / 2) * rect.height);
   }
 
   /** +1 where moving from `from` to `to` goes rightward on screen, else -1. */
@@ -193,4 +231,9 @@ export class Controls {
   private quantizeRad(radians: number): number {
     return Math.round(radians / this.layout.angle_unit_rad);
   }
+}
+
+/** Angle of `px` around `axisPx` in screen pixels, y down. */
+function calcBearingRad(axisPx: THREE.Vector2, px: THREE.Vector2): number {
+  return Math.atan2(px.y - axisPx.y, px.x - axisPx.x);
 }

@@ -109,7 +109,7 @@ impl Game {
     }
 
     /// Cuts now, returning the volumes above and below the knife's plane in cubic meters, then
-    /// the score from 0 to 100.
+    /// the unrounded score from 0 to `MAX_SCORE`.
     pub fn cut(&mut self) -> Vec<f64> {
         to_result(&self.world.cut())
     }
@@ -147,6 +147,11 @@ impl Game {
 
     pub fn stand_angle_rad(&self) -> f64 {
         self.world.get_stand_angle_rad()
+    }
+
+    /// Whether the knife stopped the stand short of its input last tick.
+    pub fn is_stand_blocked(&self) -> bool {
+        self.world.is_stand_blocked()
     }
 
     /// Tilt in radians, then lowering in meters.

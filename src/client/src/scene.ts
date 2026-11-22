@@ -9,13 +9,13 @@ const SPONGE = 0xe8c07a;
 const TABLE_THICKNESS_M = 0.04;
 const LEG_SIDE_M = 0.06;
 const LEG_INSET_M = 0.08;
-const FLOOR_Y_M = -0.76;
+const LEG_LEN_M = 0.72;
 const RIM_BEAD_COUNT = 16;
 const HALF_GAP_M = 0.03;
 const HALF_GAP_HALF_LIFE_S = 0.12;
-/** Side of the plane drawn over a cut face, larger than any cake's section. */
+/** Side of the plane drawn over a cut face, centered on the cake, larger than any cake's section. */
 const CAP_SIZE_M = 1;
-/** Thickness of the invisible box around the knife that takes its clicks, since the blade seen edge-on is a hairline. */
+/** Thickness of the invisible copy of the blade that takes its clicks, since the blade seen edge-on is a hairline. */
 const KNIFE_GRIP_THICKNESS_M = 0.04;
 
 /** Every object the player sees, rebuilt per round from the game's mesh and poses. */
@@ -79,8 +79,8 @@ export class Scene {
   }
 
   /**
-   * Draws the knife lowered by `lowerM` within its plane, rocked by `rockRad` about the center
-   * of its curved edge, as a mezzaluna rocks through a cut.
+   * Draws the knife lowered by `lowerM` within its plane, rocked by `rockRad` as its curved edge
+   * rolls along the line it rests on without slipping, as a mezzaluna rocks through a cut.
    */
   placeKnife(game: Game, lowerM: number, rockRad: number): void {
     const f = game.knife_frame();
@@ -89,8 +89,9 @@ export class Scene {
     const up = down.clone().negate();
     const edgeMiddle = this.pivot.clone().addScaledVector(down, lowerM);
     const arcCenter = new THREE.Vector3(0, this.layout.blade_arc_radius_m, 0);
+    const rollM = -this.layout.blade_arc_radius_m * rockRad;
     const rock = new THREE.Matrix4()
-      .makeTranslation(arcCenter)
+      .makeTranslation(arcCenter.clone().setX(rollM))
       .multiply(new THREE.Matrix4().makeRotationZ(rockRad))
       .multiply(new THREE.Matrix4().makeTranslation(arcCenter.clone().negate()));
     this.knife.matrix.makeBasis(edge, up, edge.clone().cross(up)).setPosition(edgeMiddle).multiply(rock);
@@ -147,7 +148,7 @@ export class Scene {
       const cutPoint = this.pivot.clone().addScaledVector(half.offset, gap);
       half.group.position.copy(half.offset).multiplyScalar(gap);
       half.clip.setFromNormalAndCoplanarPoint(half.offset, cutPoint);
-      half.cap.position.copy(cutPoint);
+      half.clip.projectPoint(this.cake.position.clone().add(half.group.position), half.cap.position);
       half.cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), half.offset.clone().negate());
     }
     const canvas = this.renderer.domElement;
@@ -159,10 +160,14 @@ export class Scene {
     this.renderer.render(this.scene, this.camera);
   }
 
+  /** A warm key light low enough to the side that it is plainly not overhead, and a cool unshadowed fill from the far side. */
   private addLights(): void {
-    this.scene.add(new THREE.HemisphereLight(0xfff4e0, 0x2a2420, 1.2));
-    const sun = new THREE.DirectionalLight(0xffffff, 2.2);
-    sun.position.set(0.5, 2.0, 0.8);
+    this.scene.add(new THREE.HemisphereLight(0xfff4e0, 0x2a2420, 0.7));
+    const fill = new THREE.DirectionalLight(0x9fb8ff, 0.9);
+    fill.position.set(-1.2, 0.9, -0.9);
+    this.scene.add(fill);
+    const sun = new THREE.DirectionalLight(0xfff1dc, 2.4);
+    sun.position.set(1.7, 1.2, 0.6);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     sun.shadow.bias = -0.0005;
@@ -178,24 +183,17 @@ export class Scene {
     top.castShadow = true;
     top.receiveShadow = true;
     this.scene.add(top);
-    const legLenM = -TABLE_THICKNESS_M - FLOOR_Y_M;
     for (const [sx, sz] of [
       [1, 1],
       [1, -1],
       [-1, 1],
       [-1, -1],
     ]) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(LEG_SIDE_M, legLenM, LEG_SIDE_M), wood);
-      leg.position.set(sx * (halfX - LEG_INSET_M), FLOOR_Y_M + legLenM / 2, sz * (halfZ - LEG_INSET_M));
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(LEG_SIDE_M, LEG_LEN_M, LEG_SIDE_M), wood);
+      leg.position.set(sx * (halfX - LEG_INSET_M), -TABLE_THICKNESS_M - LEG_LEN_M / 2, sz * (halfZ - LEG_INSET_M));
       leg.castShadow = true;
       this.scene.add(leg);
     }
-    const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(10, 10).rotateX(-Math.PI / 2).translate(0, FLOOR_Y_M, 0),
-      new THREE.MeshStandardMaterial({ color: 0x3a332c, roughness: 0.95 }),
-    );
-    floor.receiveShadow = true;
-    this.scene.add(floor);
   }
 
   /** Plate, column, and base, with beads around the rim so its turning shows. */
@@ -239,9 +237,8 @@ export class Scene {
       new THREE.MeshStandardMaterial({ color: 0xcfd6dc, metalness: 0.8, roughness: 0.3, side: THREE.DoubleSide }),
     );
     blade.castShadow = true;
-    const gripHeightM = layout.blade_back_m + layout.handle_len_m;
     const grip = new THREE.Mesh(
-      new THREE.BoxGeometry(2 * layout.blade_half_span_m, gripHeightM, KNIFE_GRIP_THICKNESS_M).translate(0, gripHeightM / 2, 0),
+      new THREE.ExtrudeGeometry(shape, { depth: KNIFE_GRIP_THICKNESS_M, bevelEnabled: false }).translate(0, 0, -KNIFE_GRIP_THICKNESS_M / 2),
       new THREE.MeshBasicMaterial({ visible: false }),
     );
     this.knife.add(blade, grip);

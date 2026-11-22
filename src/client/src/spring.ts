@@ -23,6 +23,15 @@ export class Spring {
     return this.value;
   }
 
+  /** Holds both value and target at or below `max`, as at a hard stop. */
+  capAt(max: number): void {
+    if (this.value > max) {
+      this.value = max;
+      this.velocity = Math.min(this.velocity, 0);
+    }
+    this.target = Math.min(this.target, max);
+  }
+
   snap(value: number): void {
     this.value = value;
     this.target = value;

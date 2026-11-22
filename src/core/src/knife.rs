@@ -24,6 +24,16 @@ pub const START_KNIFE: Knife = Knife { tilt_rad: MAX_TILT_RAD, lower_m: 0.0 };
 const EDGE: DVec3 = DVec3::Z;
 const BLADE_HULL_SEGMENTS: u32 = 16;
 const BLADE_COLLIDER_THICKNESS_M: f64 = 0.01;
+/// Largest move tried at once when sweeping a turn for where it meets a solid, small enough not
+/// to skip through a thin part.
+const SWEEP_PROBE_RAD: f64 = 0.01;
+const SWEEP_BISECTIONS: u32 = 16;
+/// How far short of a solid a sweep stops, so a cake settling a hair after the stop does not
+/// cross the blade's plane, where the lowering limit jumps from a wall's foot to its top.
+const SWEEP_MARGIN_RAD: f64 = 0.005;
+/// How far the edge may sink into a solid it rests on and still count as clear, so a cake
+/// settling under a resting knife does not block every turn.
+const TOUCH_TOLERANCE_M: f64 = 0.0005;
 
 /// The knife's cut plane always passes through [`PIVOT`], tilting about the edge's direction.
 /// At rest the edge's lowest point lies on the pivot, and lowering slides it down within its
@@ -75,12 +85,23 @@ impl Knife {
         Rotation::from_xyzw(x as f32, y as f32, z as f32, w as f32)
     }
 
-    /// Takes the player's tilt and lowering, lowering only until the edge meets a solid. The
-    /// blade never pushes a solid; one rising into it raises it instead.
+    /// Takes the player's lowering, then tilt, then lowering again at the new tilt. Lowering
+    /// stops where the edge meets a solid, and tilting stops where the lowered edge would enter
+    /// one. The blade never pushes a solid; one rising into it raises it instead.
     pub fn step(&mut self, input: &KnifeInput, solids: &[Solid]) {
-        self.tilt_rad = calc_radians(input.tilt).clamp(-MAX_TILT_RAD, MAX_TILT_RAD);
-        let limit_m = self.calc_lower_limit_m(solids);
-        self.lower_m = calc_meters(input.lower).min(limit_m).max(0.0);
+        let lower_m = calc_meters(input.lower).max(0.0);
+        self.lower_m = lower_m.min(self.calc_lower_limit_m(solids)).max(0.0);
+        let target_tilt_rad = calc_radians(input.tilt).clamp(-MAX_TILT_RAD, MAX_TILT_RAD);
+        self.tilt_rad = calc_sweep_reach(self.tilt_rad, target_tilt_rad, |tilt_rad| {
+            Knife { tilt_rad, ..*self }.is_clear_of(solids)
+        });
+        self.lower_m = lower_m.min(self.calc_lower_limit_m(solids)).max(0.0);
+    }
+
+    /// Whether the edge at its lowering stays out of every solid, give or take
+    /// [`TOUCH_TOLERANCE_M`].
+    pub fn is_clear_of(&self, solids: &[Solid]) -> bool {
+        self.calc_lower_limit_m(solids) >= self.lower_m - TOUCH_TOLERANCE_M
     }
 
     /// How far the edge can lower before it touches one of `solids` or the table.
@@ -98,6 +119,37 @@ impl Knife {
         }
         limit_m
     }
+}
+
+/// How far a turn from `from_rad` toward `to_rad` gets while `is_clear` holds, stopping
+/// [`SWEEP_MARGIN_RAD`] short of where it first fails but never turning back. Sweeps in small
+/// steps and refines the first step that fails.
+pub fn calc_sweep_reach(from_rad: f64, to_rad: f64, is_clear: impl Fn(f64) -> bool) -> f64 {
+    let probe_to_rad = to_rad + SWEEP_MARGIN_RAD * (to_rad - from_rad).signum();
+    let step_len = libm::ceil((probe_to_rad - from_rad).abs() / SWEEP_PROBE_RAD).max(1.0) as u32;
+    let mut clear_rad = from_rad;
+    for i in 1..=step_len {
+        let probe_rad = from_rad + (probe_to_rad - from_rad) * i as f64 / step_len as f64;
+        if !is_clear(probe_rad) {
+            let blocked_rad = calc_bisected_reach(clear_rad, probe_rad, is_clear);
+            let reach_rad = ((blocked_rad - from_rad).abs() - SWEEP_MARGIN_RAD).max(0.0);
+            return from_rad + reach_rad * (to_rad - from_rad).signum();
+        }
+        clear_rad = probe_rad;
+    }
+    to_rad
+}
+
+fn calc_bisected_reach(mut clear_rad: f64, mut blocked_rad: f64, is_clear: impl Fn(f64) -> bool) -> f64 {
+    for _ in 0..SWEEP_BISECTIONS {
+        let middle_rad = (clear_rad + blocked_rad) / 2.0;
+        if is_clear(middle_rad) {
+            clear_rad = middle_rad;
+        } else {
+            blocked_rad = middle_rad;
+        }
+    }
+    clear_rad
 }
 
 /// Height of the edge above its lowest point at `u_m` along it.

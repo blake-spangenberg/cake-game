@@ -27,7 +27,8 @@ const grams = document.querySelector<HTMLDivElement>("#grams")!;
 const score = document.querySelector<HTMLDivElement>("#score")!;
 
 const scene = new Scene(canvas, layout);
-const orbit = new Orbit(scene.camera, new THREE.Vector3(0, layout.stand_top_y_m, 0));
+/** The camera orbits halfway between the resting knife's edge and the stand's plate. */
+const orbit = new Orbit(scene.camera, new THREE.Vector3(0, (layout.pivot_y_m + layout.stand_top_y_m) / 2, 0));
 let game = new Game(roundTicks);
 const controls = new Controls(scene, orbit, layout, game.knife_pose()[0]);
 /** The cut in progress: when it started, the knife's travel, and the result to show once it lands. */
@@ -64,7 +65,7 @@ function animateCut(nowMs: number): void {
   const [above, below, points] = cut.split;
   const [aboveG, belowG] = [above, below].map((m3) => Math.round(m3 * layout.density_g_per_m3));
   grams.textContent = `${aboveG} g | ${belowG} g`;
-  score.textContent = `${(Math.floor(points * 10) / 10).toFixed(1)}`;
+  score.textContent = `${points.toFixed(1)}%`;
   result.hidden = false;
 }
 
@@ -72,7 +73,7 @@ function stepSimulation(elapsedMs: number, nowMs: number): void {
   lagMs += elapsedMs;
   let ticks = 0;
   while (lagMs >= tickMs && ticks < MAX_TICKS_PER_FRAME && !cutting) {
-    game.step(controls.stepInput(game.knife_pose()[1]));
+    game.step(controls.stepInput(game));
     lagMs -= tickMs;
     ticks += 1;
     const split = game.find_split();

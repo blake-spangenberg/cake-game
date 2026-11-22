@@ -17,8 +17,15 @@ The game is intuitive (it depicts a scenario that could exist in the real world)
 - The controls must be simple, intuitive, and mouse only: no keyboard input is ever required. Dragging anywhere else swings the camera around the table's center and the wheel zooms; arrow keys and WASD also swing it, as a second-class option. Use words, numbers, instruction, etc. as a last result to communicate to the player, prefer diagetic information.
 - The knife is a mezzaluna whose cut plane always passes through a fixed point above the cutting region, a cake stand the player sets the cake on. Dragging the knife (blade or either handle) tilts it with the mouse's left/right travel and lowers it toward the cake with up/down travel to check the line. Lowering stops at the cake's surface without pushing it, eases back up when the player lets go, and never cuts. The knife never turns: the player turns the cake stand instead. Every control moves relative to where the drag started, eased through springs. A big, obvious `Cut!` button, clearly separated from the other controls, freezes time, physics, and input and performs the cut immediately along the knife's current pose, so a cake still settling is cut as it is at that instant. Tilt is limited to roughly 45-60 degrees from vertical, so every cut still looks like slicing a cake.
 - The cake moves one way only: the player picks it up by mouse click at a point on its surface and it hangs from that point under gravity. Grabbing a tall cake near its bottom and lifting it flips it inverted in the hand, and it lands in that orientation when lowered back to the table. Letting go hands the cake to gravity and table collision in full, and it settles at its natural resting pose. Where the cake is set down decides where the cut plane lands, and how it was grabbed decides its orientation, so knife and cake together reach every plane.
+- Placement plays out in stages, each gentle enough to keep what the last one set and each punished by physics when rushed:
+    - A carried cake hovers a centimeter above what lies beneath it, as a stand pickup does, rising smoothly toward the stand's height as it nears across most of the table, and where it is grabbed works its orientation
+    - Dragging it onto the stand keeps that orientation, unless done too violently or caught on the rim, which may turn it
+    - Picking it up while on the stand lifts it only enough to slide it across the plate, keeping its orientation
+    - Turning the stand adjusts it further. Circling the mouse around the stand turns it the same way for as long as the circling goes on
+    - Tilting the knife makes the final adjustment. A lowered knife stops both tilting and turning where it meets the cake or stand rather than jumping clear
 - The perspective must not be ambigious. A cut must not be unexpectedly bad for a player due to the player's misunderstanding due to an illusion of perspective. Players can check the knife against the cake from alternate camera angles and by lowering the knife. Knife and cake cast shadows on the table and each other as natural depth cues.
 - A cut must be final.
+- Scores are a percentage shown to the nearest 0.1%. The unrounded score breaks ties.
 - The game should rely on player entropy to increase variance of outcome. For example, do not start the knife over the cake but rather each on separate sides of the table. Start the knife at an unhelpful orientation. The more input distance that is required of players, the more a skilled player can express their advantage.
 - Players must be able to see their opponents knife and cake movements in realtime, and clearly see when they have completed their cut. The view is full fidelity: copying a rival's line is part of the game.
 - Players must not be able to see any player's score including their own until all players have completed the cut or time elapses.
@@ -29,6 +36,7 @@ The game is intuitive (it depicts a scenario that could exist in the real world)
     - damage to a sourced cake: a missing slice, a bite, a collapsed tier
     - models that were never meant to be cakes (e.g. a rubber duck with a scarf), whose cake nature is revealed only when the cut exposes the layers inside
 - Cut faces show cake inside, since the secret-cake reveal depends on it.
+- The table floats in an abstract space with no floor or room around it. A cake dropped off it falls for about 3 seconds before it respawns.
 - Nothing carries over between rounds: no leaderboard, no stored player identity.
 
 ## Stretch goals

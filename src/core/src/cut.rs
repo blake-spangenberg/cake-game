@@ -16,16 +16,17 @@ pub struct Split {
 
 /// Grams per cubic meter, uniform for every cake.
 pub const DENSITY_G_PER_M3: f64 = 1.0e6;
+pub const MAX_SCORE: f64 = 100.0;
 
 impl Split {
-    /// 100 for halves of equal volume, falling linearly with the imbalance to 0 for a cut that
-    /// misses.
+    /// [`MAX_SCORE`] for halves of equal volume, falling linearly with the imbalance to 0 for a
+    /// cut that misses: a percentage. Players see it rounded, and the unrounded value breaks ties.
     pub fn calc_score(&self) -> f64 {
         let total_m3 = self.above_m3 + self.below_m3;
         if total_m3 <= 0.0 {
             return 0.0;
         }
-        100.0 * (1.0 - (self.above_m3 - self.below_m3).abs() / total_m3)
+        MAX_SCORE * (1.0 - (self.above_m3 - self.below_m3).abs() / total_m3)
     }
 }
 

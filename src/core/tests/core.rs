@@ -5,9 +5,12 @@ use cake_core::knife::{Knife, START_KNIFE, Solid, calc_edge_rise_m};
 use cake_core::mesh::{Mesh, MeshError};
 use cake_core::replay::{build_scripted_inputs, replay};
 use cake_core::sim::{Phase, ROUND_TICKS, World};
-use cake_core::table::{CAKE_SPAWN, MAX_CAKE_EXTENT_M, PIVOT, STAND_TOP_Y_M, TABLE_HALF_X_M, TABLE_HALF_Z_M};
+use cake_core::table::{
+    CAKE_SPAWN, MAX_CAKE_EXTENT_M, PIVOT, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M, TABLE_HALF_X_M,
+    TABLE_HALF_Z_M,
+};
 use rapier3d::glamx::DVec3;
-use rapier3d::math::Vec3;
+use rapier3d::math::{Rotation, Vec3};
 
 /// A closed axis-aligned box from `min` to `max`, wound outward.
 fn build_box(min: [f32; 3], max: [f32; 3]) -> Mesh {
@@ -137,6 +140,20 @@ fn knife_ignores_a_cake_beyond_its_blade_end() {
 }
 
 #[test]
+fn lowered_knife_tilted_into_a_cake_stops_against_it_rather_than_rising() {
+    let cake = build_box([-0.15, 0.0, -0.1], [-0.05, 0.2, 0.1]);
+    let positions = to_dvec3s(&cake);
+    let solids = [Solid { positions: &positions, triangles: &cake.triangles }];
+    let lower = (0.3 / POSITION_UNIT_M) as i32;
+    let mut knife = Knife::default();
+    knife.step(&KnifeInput { tilt: 0, lower }, &solids);
+    assert!((knife.lower_m - 0.3).abs() < 1e-3, "{knife:?}");
+    knife.step(&KnifeInput { tilt: (0.5 / ANGLE_UNIT_RAD) as i32, lower }, &solids);
+    assert!((knife.lower_m - 0.3).abs() < 1e-3, "{knife:?}");
+    assert!((0.1..0.2).contains(&knife.tilt_rad), "{knife:?}");
+}
+
+#[test]
 fn knife_rotation_matches_its_frame() {
     let knife = Knife { tilt_rad: 0.3, lower_m: 0.0 };
     let frame = knife.calc_frame();
@@ -227,9 +244,83 @@ fn turning_stand_carries_the_cake_around() {
 }
 
 #[test]
+fn cake_grabbed_on_the_stand_by_its_rim_lifts_barely_and_keeps_its_orientation() {
+    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    for input in &build_scripted_inputs()[..300] {
+        world.step(input);
+    }
+    for _ in 0..120 {
+        world.step(&Input::default());
+    }
+    let before = world.get_cake_pose().rotation;
+    let rim =
+        world.get_cake_positions().iter().copied().fold(DVec3::NEG_INFINITY, |a, b| if b.x > a.x { b } else { a });
+    let grab_at = rim.to_array().map(|m| (m / POSITION_UNIT_M).round() as i32);
+    let hand = HandInput { grab_at, target_xz: [grab_at[0], grab_at[2]] };
+    for _ in 0..120 {
+        world.step(&Input { hand: Some(hand), ..Input::default() });
+    }
+    let lowest_y_m = world.get_cake_positions().iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+    assert!(lowest_y_m - STAND_TOP_Y_M < 0.02, "{lowest_y_m}");
+    let slide_m = 0.05;
+    for tick in 1..=60 {
+        let target_x = grab_at[0] - (slide_m * tick as f64 / 60.0 / POSITION_UNIT_M) as i32;
+        world.step(&Input { hand: Some(HandInput { target_xz: [target_x, grab_at[2]], ..hand }), ..Input::default() });
+    }
+    for _ in 0..120 {
+        world.step(&Input::default());
+    }
+    let up = |rotation: Rotation| rotation * Vec3::Y;
+    let tilt_rad = up(world.get_cake_pose().rotation).angle_between(up(before));
+    assert!(tilt_rad < 0.05, "{tilt_rad}");
+    assert!(world.get_cake_pose().translation.x < rim.x as f32 - 0.11 - slide_m as f32 / 2.0);
+}
+
+#[test]
+fn turning_the_stand_stops_where_the_cake_meets_the_lowered_knife() {
+    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    for input in &build_scripted_inputs()[..300] {
+        world.step(input);
+    }
+    let tilt = (0.3 / ANGLE_UNIT_RAD) as i32;
+    let mut input = Input { knife: KnifeInput { tilt, lower: (0.3 / POSITION_UNIT_M) as i32 }, ..Input::default() };
+    for _ in 0..120 {
+        world.step(&input);
+    }
+    let rested_m = world.get_knife().lower_m;
+    assert!(rested_m < 0.3, "the knife missed the cake");
+    input.stand_angle = (core::f64::consts::PI / ANGLE_UNIT_RAD) as i32;
+    let mut was_blocked = false;
+    for _ in 0..120 {
+        world.step(&input);
+        was_blocked |= world.is_stand_blocked();
+        assert!(world.get_knife().lower_m > rested_m - 0.001, "{} after {rested_m}", world.get_knife().lower_m);
+    }
+    assert!(was_blocked);
+    assert!(world.get_stand_angle_rad() < 2.0, "{}", world.get_stand_angle_rad());
+}
+
+#[test]
+fn held_cake_dragged_through_the_stand_does_not_clip_into_it() {
+    let (mut world, hand) = hold_cake_by_its_rim();
+    let across = [-0.4, 0.0].map(|m| (m / POSITION_UNIT_M).round() as i32);
+    let plate_bottom_y_m = STAND_TOP_Y_M - STAND_PLATE_THICKNESS_M;
+    for _ in 0..240 {
+        world.step(&Input { hand: Some(HandInput { target_xz: across, ..hand }), ..Input::default() });
+        let depth_m = world
+            .get_cake_positions()
+            .iter()
+            .filter(|p| (plate_bottom_y_m..STAND_TOP_Y_M - 0.003).contains(&p.y))
+            .map(|p| STAND_RADIUS_M - p.with_y(0.0).length())
+            .fold(0.0, f64::max);
+        assert!(depth_m < 0.01, "a cake corner sank {depth_m} m into the plate");
+    }
+}
+
+#[test]
 fn cake_falling_off_the_table_respawns() {
     let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
-    let grab_at = [CAKE_SPAWN.x, 0.05, CAKE_SPAWN.z].map(|m| (m / POSITION_UNIT_M).round() as i32);
+    let grab_at = [CAKE_SPAWN.x + 0.11, 0.035, CAKE_SPAWN.z].map(|m| (m / POSITION_UNIT_M).round() as i32);
     let edge = [TABLE_HALF_X_M, TABLE_HALF_Z_M].map(|m| (m / POSITION_UNIT_M).round() as i32);
     let carry = Input { hand: Some(HandInput { grab_at, target_xz: edge }), ..Input::default() };
     let mut has_left_spawn = false;
@@ -238,7 +329,7 @@ fn cake_falling_off_the_table_respawns() {
         has_left_spawn |= world.get_cake_pose().translation.distance(CAKE_SPAWN.as_vec3()) > 0.2;
     }
     assert!(has_left_spawn);
-    assert!(world.get_cake_pose().translation.distance(CAKE_SPAWN.as_vec3()) < 0.05);
+    assert!(world.get_cake_pose().translation.distance(CAKE_SPAWN.as_vec3()) < 0.05, "{:?}", world.get_cake_pose());
 }
 
 #[test]
@@ -276,10 +367,10 @@ fn hold_cake_by_its_rim() -> (World, HandInput) {
 }
 
 #[test]
-fn carried_cake_over_the_table_clears_it_just_barely() {
+fn carried_cake_far_from_the_stand_clears_the_table_just_barely() {
     let (world, _) = hold_cake_by_its_rim();
     let lowest_y_m = world.get_cake_positions().iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-    assert!((0.005..0.05).contains(&lowest_y_m), "{lowest_y_m}");
+    assert!((0.0..STAND_TOP_Y_M / 2.0).contains(&lowest_y_m), "{lowest_y_m}");
 }
 
 #[test]
