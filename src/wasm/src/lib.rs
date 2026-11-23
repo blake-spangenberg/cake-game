@@ -1,6 +1,6 @@
 //! The browser's handle on the core simulation.
 
-use cake_core::cakes::CakeModel;
+use cake_core::cakes::{CakeModel, Skin};
 use cake_core::input::Input;
 use cake_core::knife::{
     BLADE_ARC_RADIUS_M, BLADE_BACK_M, BLADE_HALF_SPAN_M, BLADE_THICKNESS_M, HANDLE_LEN_M, HANDLE_RADIUS_M,
@@ -172,9 +172,23 @@ impl Game {
         self.world.get_model().mesh.positions.iter().flat_map(|p| p.to_array()).collect()
     }
 
-    /// The cake mesh's sRGB vertex colors, flattened.
-    pub fn get_cake_mesh_colors(&self) -> Vec<u8> {
-        self.world.get_model().colors.iter().flatten().copied().collect()
+    /// Each cake mesh triangle's corners' UVs from the texture's top left, 0 to 1, flattened in
+    /// triangle order, or none for a plain cake.
+    pub fn get_cake_corner_uvs(&self) -> Vec<f32> {
+        match &self.world.get_model().skin {
+            Skin::Plain => Vec::new(),
+            Skin::Textured { corner_uvs, .. } => {
+                corner_uvs.iter().flatten().flatten().map(|&coord| f32::from(coord) / f32::from(u16::MAX)).collect()
+            }
+        }
+    }
+
+    /// The cake's texture image file, or none for a plain cake.
+    pub fn get_cake_texture(&self) -> Vec<u8> {
+        match &self.world.get_model().skin {
+            Skin::Plain => Vec::new(),
+            Skin::Textured { image, .. } => image.clone(),
+        }
     }
 
     /// The cake mesh's triangles as vertex indices, flattened.

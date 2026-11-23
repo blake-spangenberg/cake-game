@@ -1,10 +1,15 @@
 import * as THREE from "three";
+import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { type Game, type Layout, get_blade_outline, get_handle_centers, get_stand_parts } from "@wasm/cake_wasm.js";
 import { Spring } from "./spring";
 
 export type PickKind = "cake" | "knife" | "stand";
 
 const SPONGE = 0xe8c07a;
+/** The color of a cake with no texture of its own. */
+const FROSTING = 0xf3e3ec;
+/** Neighboring faces meeting at a sharper angle than this keep a hard edge; gentler ones shade smoothly. */
+const CREASE_ANGLE_RAD = Math.PI / 3;
 const TABLE_THICKNESS_M = 0.04;
 const LEG_SIDE_M = 0.06;
 const LEG_INSET_M = 0.08;
@@ -30,6 +35,7 @@ export class Scene {
   private readonly pivot: THREE.Vector3;
   private readonly halfGap = new Spring(0, HALF_GAP_HALF_LIFE_S);
   private halves: { group: THREE.Group; cap: THREE.Mesh; clip: THREE.Plane; offset: THREE.Vector3 }[] = [];
+  private cakeTexture: THREE.Texture | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -59,12 +65,15 @@ export class Scene {
     return null;
   }
 
-  /** Replaces the cake with the game's mesh, whole. */
-  resetCake(game: Game): void {
+  /** Replaces the cake with the game's mesh, whole, once its texture is decoded. */
+  async resetCake(game: Game): Promise<void> {
+    const texture = await this.loadCakeTexture(game);
     for (const half of this.halves) this.scene.remove(half.group, half.cap);
     this.halves = [];
     this.cake.clear();
-    const mesh = new THREE.Mesh(buildCakeGeometry(game), new THREE.MeshStandardMaterial({ vertexColors: true }));
+    this.cakeTexture?.dispose();
+    this.cakeTexture = texture;
+    const mesh = new THREE.Mesh(buildCakeGeometry(game), this.buildCakeMaterial());
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     this.cake.add(mesh);
@@ -119,7 +128,7 @@ export class Scene {
         mesh.quaternion.copy(this.cake.quaternion);
         group.add(mesh);
       };
-      const frosting = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ vertexColors: true, clippingPlanes: [clip], clipShadows: true }));
+      const frosting = new THREE.Mesh(geometry, this.buildCakeMaterial({ clippingPlanes: [clip], clipShadows: true }));
       frosting.castShadow = true;
       placeLikeCake(frosting);
       for (const [faces, stencilOp] of [
@@ -138,6 +147,27 @@ export class Scene {
       this.scene.add(group);
     }
     this.cake.visible = false;
+  }
+
+  /** The cake's texture, mipmapped and as sharp at grazing angles as the GPU allows, or none for a plain cake. */
+  private async loadCakeTexture(game: Game): Promise<THREE.Texture | null> {
+    const file = game.get_cake_texture();
+    if (file.length === 0) return null;
+    const bitmap = await createImageBitmap(new Blob([new Uint8Array(file)], { type: "image/webp" }), {
+      colorSpaceConversion: "none",
+      premultiplyAlpha: "none",
+    });
+    const texture = new THREE.Texture(bitmap);
+    texture.flipY = false;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  private buildCakeMaterial(parameters: THREE.MeshStandardMaterialParameters = {}): THREE.Material {
+    const skin = this.cakeTexture ? { map: this.cakeTexture } : { color: FROSTING };
+    return new THREE.MeshStandardMaterial({ ...skin, ...parameters });
   }
 
   partHalves(): void {
@@ -286,23 +316,13 @@ function buildCapMaterial(): THREE.Material {
   });
 }
 
-/** The vertex colors as the renderer's linear floats, from the cake file's sRGB bytes. */
-function calcLinearColors(srgbBytes: Uint8Array): Float32Array {
-  const color = new THREE.Color();
-  const linear = new Float32Array(srgbBytes.length);
-  for (let i = 0; i < srgbBytes.length; i += 3) {
-    color.setRGB(srgbBytes[i] / 255, srgbBytes[i + 1] / 255, srgbBytes[i + 2] / 255, THREE.SRGBColorSpace);
-    linear.set([color.r, color.g, color.b], i);
-  }
-  return linear;
-}
-
+/** The cake's mesh, each triangle with its own corners so texture seams stay sharp, shaded smoothly but for creases. */
 function buildCakeGeometry(game: Game): THREE.BufferGeometry {
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(game.get_cake_mesh_positions(), 3));
-  geometry.setIndex(new THREE.BufferAttribute(game.get_cake_mesh_triangles(), 1));
-  geometry.setAttribute("color", new THREE.BufferAttribute(calcLinearColors(game.get_cake_mesh_colors()), 3));
-  const faceted = geometry.toNonIndexed();
-  faceted.computeVertexNormals();
-  return faceted;
+  const indexed = new THREE.BufferGeometry();
+  indexed.setAttribute("position", new THREE.BufferAttribute(game.get_cake_mesh_positions(), 3));
+  indexed.setIndex(new THREE.BufferAttribute(game.get_cake_mesh_triangles(), 1));
+  const corners = indexed.toNonIndexed();
+  const uvs = game.get_cake_corner_uvs();
+  if (uvs.length > 0) corners.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  return toCreasedNormals(corners, CREASE_ANGLE_RAD);
 }

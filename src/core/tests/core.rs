@@ -1,4 +1,4 @@
-use cake_core::cakes::{CakeError, CakeModel, MAX_HULL_VERTICES, build_slice_missing_cake};
+use cake_core::cakes::{CakeError, CakeModel, MAX_HULL_VERTICES, Skin, build_slice_missing_cake};
 use cake_core::cut::{Plane, Split, calc_split};
 use cake_core::input::{HandInput, Input, InputError, KnifeInput, quantize_meters, quantize_radians};
 use cake_core::knife::{Knife, START_KNIFE, Solid, calc_edge_rise_m};
@@ -41,7 +41,7 @@ fn placeholder_cake_is_closed() {
 fn build_box_cake(half_x_m: f32, height_m: f32, half_z_m: f32) -> CakeModel {
     let mesh = build_box([-half_x_m, 0.0, -half_z_m], [half_x_m, height_m, half_z_m]);
     let hull = mesh.positions.clone();
-    CakeModel::build_plain(mesh, vec![hull])
+    CakeModel { mesh, skin: Skin::Plain, hulls: vec![hull] }
 }
 
 #[test]
@@ -67,12 +67,15 @@ fn cake_file_rejects_damaged_bytes() {
 }
 
 #[test]
-fn cake_file_keeps_its_vertex_colors_and_needs_one_per_vertex() {
+fn cake_file_keeps_its_texture_and_needs_a_uv_triple_per_triangle() {
     let mut model = build_box_cake(0.05, 0.05, 0.05);
-    model.colors[3] = [1, 2, 3];
+    let mut corner_uvs: Vec<[[u16; 2]; 3]> =
+        (0..model.mesh.triangles.len() as u16).map(|idx| [[idx, 1], [2, u16::MAX], [3, idx]]).collect();
+    model.skin = Skin::Textured { corner_uvs: corner_uvs.clone(), image: b"RIFF....WEBP".to_vec() };
     assert_eq!(CakeModel::decode(&model.encode()), Ok(model.clone()));
-    model.colors.pop();
-    assert_eq!(model.validate(), Err(CakeError::BadColors));
+    corner_uvs.pop();
+    model.skin = Skin::Textured { corner_uvs, image: b"RIFF....WEBP".to_vec() };
+    assert_eq!(model.validate(), Err(CakeError::BadSkin));
 }
 
 #[test]

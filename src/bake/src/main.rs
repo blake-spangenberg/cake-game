@@ -1,12 +1,13 @@
 //! Bakes a repaired `.glb` model (from `tools/repair-model.py`) into the `.cake` file the game
-//! loads: the render mesh plus the convex hulls of its physics collider.
+//! loads: the render mesh and its texture plus the convex hulls of its physics collider.
 //!
 //! Usage: `bake-cake <model.glb> <out.cake>`
 
+use std::collections::HashMap;
 use std::process::ExitCode;
 use std::{env, fs};
 
-use cake_core::cakes::{CakeModel, MAX_HULL_VERTICES};
+use cake_core::cakes::{CakeModel, MAX_HULL_VERTICES, Skin};
 use cake_core::mesh::Mesh;
 use rapier3d::math::Vec3;
 use rapier3d::parry::transformation::convex_hull;
@@ -43,18 +44,18 @@ fn main() -> ExitCode {
 
 fn bake(source: &str, destination: &str) -> Result<String, String> {
     let bytes = fs::read(source).map_err(|error| format!("cannot read the model: {error}"))?;
-    let (mesh, colors) = fetch_mesh(&bytes)?;
+    let (mesh, skin) = fetch_mesh(&bytes)?;
     let hulls = build_hulls(&mesh)?;
-    let model = CakeModel { mesh, colors, hulls };
+    let model = CakeModel { mesh, skin, hulls };
     model.validate().map_err(|error| format!("not a playable cake: {error:?}"))?;
     fs::write(destination, model.encode()).map_err(|error| format!("cannot write {destination}: {error}"))?;
     let hull_sizes: Vec<usize> = model.hulls.iter().map(Vec::len).collect();
     Ok(format!("{} triangles, {} hulls with {hull_sizes:?} vertices", model.mesh.triangles.len(), model.hulls.len()))
 }
 
-/// The one triangle mesh of a repaired glb and its vertex colors, in meters with the node
-/// transform ignored.
-fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Vec<[u8; 3]>), String> {
+/// The one triangle mesh of a repaired glb, welded back into a closed mesh where its texture
+/// seams split it, and its texture, in meters with the node transform ignored.
+fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Skin), String> {
     let glb = gltf::Gltf::from_slice(bytes).map_err(|error| format!("not a glb: {error}"))?;
     let blob = glb.blob.as_deref();
     let mut meshes = glb.meshes();
@@ -66,19 +67,51 @@ fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Vec<[u8; 3]>), String> {
         return Err("expected exactly one primitive; run tools/repair-model.py first".into());
     };
     let reader = primitive.reader(|_| blob);
-    let positions = reader.read_positions().ok_or("the mesh has no positions")?;
-    let indices = reader.read_indices().ok_or("the mesh has no indices")?;
-    let indices: Vec<u32> = indices.into_u32().collect();
+    let split_positions: Vec<[f32; 3]> = reader.read_positions().ok_or("the mesh has no positions")?.collect();
+    let indices: Vec<u32> = reader.read_indices().ok_or("the mesh has no indices")?.into_u32().collect();
     if !indices.len().is_multiple_of(3) {
         return Err("the index count is not a multiple of 3".into());
     }
-    let positions: Vec<Vec3> = positions.map(Vec3::from_array).collect();
-    let colors: Vec<[u8; 3]> = reader.read_colors(0).ok_or("the mesh has no vertex colors")?.into_rgb_u8().collect();
-    if colors.len() != positions.len() {
-        return Err("the mesh does not have one color per vertex".into());
+    let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0).ok_or("the mesh has no UVs")?.into_f32().collect();
+    if uvs.len() != split_positions.len() {
+        return Err("the mesh does not have one UV per vertex".into());
     }
-    let triangles = indices.chunks_exact(3).map(|triangle| [triangle[0], triangle[1], triangle[2]]).collect();
-    Ok((Mesh { positions, triangles }, colors))
+    let mut images = glb.images();
+    let (Some(image), None) = (images.next(), images.next()) else {
+        return Err("expected exactly one image; run tools/repair-model.py first".into());
+    };
+    let gltf::image::Source::View { view, .. } = image.source() else {
+        return Err("the image is not stored in the glb".into());
+    };
+    let image =
+        blob.and_then(|blob| blob.get(view.offset()..view.offset() + view.length())).ok_or("the image is missing")?;
+    let (positions, welded_ids) = weld(&split_positions);
+    let split_triangles: Vec<[usize; 3]> =
+        indices.chunks_exact(3).map(|corners| [0, 1, 2].map(|k| corners[k] as usize)).collect();
+    let triangles = split_triangles.iter().map(|corners| corners.map(|idx| welded_ids[idx])).collect();
+    let corner_uvs = split_triangles.iter().map(|corners| corners.map(|idx| quantize_uv(uvs[idx]))).collect();
+    Ok((Mesh { positions, triangles }, Skin::Textured { corner_uvs, image: image.to_vec() }))
+}
+
+/// The distinct positions in first-seen order, and the index into them of each of `positions`.
+/// The repair copies a vertex exactly wherever a texture seam splits it, so equal bits mean one vertex.
+fn weld(positions: &[[f32; 3]]) -> (Vec<Vec3>, Vec<u32>) {
+    let mut ids_by_bits: HashMap<[u32; 3], u32> = HashMap::new();
+    let mut welded = Vec::new();
+    let ids = positions
+        .iter()
+        .map(|&position| {
+            *ids_by_bits.entry(position.map(f32::to_bits)).or_insert_with(|| {
+                welded.push(Vec3::from_array(position));
+                welded.len() as u32 - 1
+            })
+        })
+        .collect();
+    (welded, ids)
+}
+
+fn quantize_uv(uv: [f32; 2]) -> [u16; 2] {
+    uv.map(|coord| (coord.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16)
 }
 
 /// The collider: the mesh's approximate convex decomposition, each hull cut down to few vertices.
@@ -148,9 +181,9 @@ mod tests {
 
     #[test]
     fn l_shaped_model_bakes_into_a_playable_cake_with_a_hull_per_arm() {
-        let (mesh, colors) = fetch_mesh(L_SHAPE_GLB).unwrap();
+        let (mesh, skin) = fetch_mesh(L_SHAPE_GLB).unwrap();
         let hulls = build_hulls(&mesh).unwrap();
-        let model = CakeModel { mesh, colors, hulls };
+        let model = CakeModel { mesh, skin, hulls };
         assert_eq!(model.validate(), Ok(()));
         assert!(model.hulls.len() >= 2, "an L is concave, so one hull would fill its corner");
         assert!(model.hulls.iter().all(|hull| hull.len() <= MAX_HULL_VERTICES));

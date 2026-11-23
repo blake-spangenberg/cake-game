@@ -67,7 +67,8 @@ The reveal is dramatic, with pomp and circumstance, and is worth a round running
 ## Cakes
 - Every round uses one of several cakes.
 - Cakes are sourced 3D models rather than generated ones, since they are the star of the show and a generated asset dulls the impression. Models must be free (CC0 or CC-BY), with credits shown in game. The owner picks each model from a shortlist, and decides the set's size at pick time.
-- The set shares one look: smooth stylized, mid-poly models, never low-poly or flat-shaded. If too few stylized models qualify, the whole set switches to photoreal scans rather than mixing the two, so a shortlist carries scan backups for the owner to pivot to.
+- The set mixes smooth stylized, mid-poly models and photoreal scans, never low-poly or flat-shaded. A model's texture keeps its source's detail (a logo, stitching, a knit) rather than a blurred average of it.
+- A model must look right at cake size: not so flat it reads as a slab, not built for a much smaller scale so its facets show, and not filled in solid where its real counterpart is hollow (the inside of a shoe).
 - Every cake is a whole object. Nothing already sliced, bitten, or cut, real cakes included: the first cut the player sees is their own.
 - A model keeps its real counterpart's asymmetry: one left or right shoe, never a mirrored one.
 - Sessions may recolor a model, keep one item of a pair, and trim a thin part a cake could not hold. Any reshaping (bending, adding a knot) needs the owner's approval.

@@ -6,18 +6,30 @@ use rapier3d::prelude::SharedShape;
 use crate::mesh::{Mesh, MeshError, calc_arc_outline};
 use crate::table::{MAX_CAKE_EXTENT_M, STAND_RADIUS_M};
 
-/// A cake's render mesh, the color of each of its vertices, and the convex pieces its collider is
-/// built from, in its local frame with the serving side down at y = 0.
+/// A cake's render mesh, how its surface is drawn, and the convex pieces its collider is built
+/// from, in its local frame with the serving side down at y = 0.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CakeModel {
     pub mesh: Mesh,
-    /// sRGB, one per mesh vertex. Drawing only: weight and collision ignore it.
-    pub colors: Vec<[u8; 3]>,
+    /// Drawing only: weight and collision ignore it.
+    pub skin: Skin,
     pub hulls: Vec<Vec<Vec3>>,
 }
 
-/// The color of a cake with no sourced coloring.
-const FROSTING_COLOR: [u8; 3] = [0xf3, 0xe3, 0xec];
+/// How a cake's surface is drawn.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Skin {
+    /// One frosting color, for a cake with no sourced coloring.
+    Plain,
+    /// An image wrapped over the mesh.
+    Textured {
+        /// Each triangle's corners' places in the image, in the mesh's triangle order, as glTF
+        /// UVs from the image's top left scaled to the full `u16` range.
+        corner_uvs: Vec<[[u16; 2]; 3]>,
+        /// The image file as encoded, a WebP from `tools/repair-model.py`, decoded only by the client.
+        image: Vec<u8>,
+    },
+}
 
 /// The most vertices a collider hull may have: a hull face with many vertices jitters on the
 /// table and never sleeps, so baked hulls stay coarse.
@@ -27,13 +39,13 @@ pub const MAX_HULL_VERTICES: usize = 32;
 const BOUNDS_SLACK_M: f32 = 1e-4;
 
 const FILE_MAGIC: [u8; 4] = *b"CAKE";
-const FILE_VERSION: u32 = 2;
+const FILE_VERSION: u32 = 3;
 
 #[derive(Debug, PartialEq)]
 pub enum CakeError {
     Mesh(MeshError),
-    /// The model does not have exactly one color per mesh vertex.
-    BadColors,
+    /// The textured model does not have one UV triple per triangle, or has no image.
+    BadSkin,
     /// The mesh is wound inside out, or encloses no volume.
     NotOutward,
     /// The model's bounding box is longer than [`MAX_CAKE_EXTENT_M`] along an axis.
@@ -56,19 +68,15 @@ const MESH_SEGMENTS_PER_TURN: f32 = 48.0;
 const HULL_SEGMENTS_PER_TURN: f32 = 16.0;
 
 impl CakeModel {
-    /// A model of one color, [`FROSTING_COLOR`].
-    pub fn build_plain(mesh: Mesh, hulls: Vec<Vec<Vec3>>) -> CakeModel {
-        let colors = vec![FROSTING_COLOR; mesh.positions.len()];
-        CakeModel { mesh, colors, hulls }
-    }
-
-    /// Accepts the model only if the game can play it: a closed, outward-wound mesh with one color
-    /// per vertex that rests on y = 0, fits the stand's plate and the extent limit, with coarse,
-    /// solid hulls.
+    /// Accepts the model only if the game can play it: a closed, outward-wound mesh, textured with
+    /// a UV triple per triangle if at all, that rests on y = 0, fits the stand's plate and the
+    /// extent limit, with coarse, solid hulls.
     pub fn validate(&self) -> Result<(), CakeError> {
         self.mesh.validate_closed().map_err(CakeError::Mesh)?;
-        if self.colors.len() != self.mesh.positions.len() {
-            return Err(CakeError::BadColors);
+        if let Skin::Textured { corner_uvs, image } = &self.skin
+            && (corner_uvs.len() != self.mesh.triangles.len() || image.is_empty())
+        {
+            return Err(CakeError::BadSkin);
         }
         if self.mesh.calc_signed_volume() <= 0.0 {
             return Err(CakeError::NotOutward);
@@ -93,10 +101,15 @@ impl CakeModel {
         Ok(())
     }
 
-    /// The model as a baked cake file: little-endian, a magic and version, the counts, then the
-    /// mesh's positions, each hull's vertices, the triangles, and the vertex colors.
+    /// The model as a baked cake file: little-endian, a magic and version, the counts and the
+    /// image's byte length (0 for a plain skin), then the mesh's positions, each hull's vertices,
+    /// the triangles, and for a textured skin the corner UVs and the image.
     pub fn encode(&self) -> Vec<u8> {
-        let lens = [self.mesh.positions.len(), self.mesh.triangles.len(), self.hulls.len()];
+        let (corner_uvs, image): (&[[[u16; 2]; 3]], &[u8]) = match &self.skin {
+            Skin::Plain => (&[], &[]),
+            Skin::Textured { corner_uvs, image } => (corner_uvs, image),
+        };
+        let lens = [self.mesh.positions.len(), self.mesh.triangles.len(), self.hulls.len(), image.len()];
         let header = [FILE_VERSION]
             .into_iter()
             .chain(lens.map(|len| len as u32))
@@ -106,7 +119,8 @@ impl CakeModel {
         bytes.extend(header.flat_map(u32::to_le_bytes));
         bytes.extend(points.flat_map(|p| p.to_array()).flat_map(f32::to_le_bytes));
         bytes.extend(self.mesh.triangles.iter().flatten().flat_map(|index| index.to_le_bytes()));
-        bytes.extend(self.colors.iter().flatten());
+        bytes.extend(corner_uvs.iter().flatten().flatten().flat_map(|coord| coord.to_le_bytes()));
+        bytes.extend(image);
         bytes
     }
 
@@ -119,17 +133,28 @@ impl CakeModel {
         let vertex_len = reader.read_len()?;
         let triangle_len = reader.read_len()?;
         let hull_len = reader.read_len()?;
+        let image_len = reader.read_len()?;
         let hull_lens = (0..hull_len).map(|_| reader.read_len()).collect::<Result<Vec<_>, _>>()?;
         let positions = reader.read_vecs(vertex_len)?;
         let hulls = hull_lens.into_iter().map(|len| reader.read_vecs(len)).collect::<Result<Vec<_>, _>>()?;
         let triangles = (0..triangle_len)
             .map(|_| Ok([reader.read_u32()?, reader.read_u32()?, reader.read_u32()?]))
             .collect::<Result<Vec<_>, CakeError>>()?;
-        let colors = (0..vertex_len).map(|_| reader.take::<3>()).collect::<Result<Vec<_>, _>>()?;
+        let skin = if image_len == 0 {
+            Skin::Plain
+        } else {
+            let mut read_uv = || Ok([reader.read_u16()?, reader.read_u16()?]);
+            let corner_uvs = (0..triangle_len)
+                .map(|_| Ok([read_uv()?, read_uv()?, read_uv()?]))
+                .collect::<Result<Vec<_>, CakeError>>()?;
+            let image = reader.bytes.get(..image_len).ok_or(CakeError::BadFile)?.to_vec();
+            reader.bytes = &reader.bytes[image_len..];
+            Skin::Textured { corner_uvs, image }
+        };
         if !reader.bytes.is_empty() {
             return Err(CakeError::BadFile);
         }
-        let model = CakeModel { mesh: Mesh { positions, triangles }, colors, hulls };
+        let model = CakeModel { mesh: Mesh { positions, triangles }, skin, hulls };
         model.validate()?;
         Ok(model)
     }
@@ -145,6 +170,10 @@ impl Reader<'_> {
         let (head, tail) = self.bytes.split_first_chunk::<N>().ok_or(CakeError::BadFile)?;
         self.bytes = tail;
         Ok(*head)
+    }
+
+    fn read_u16(&mut self) -> Result<u16, CakeError> {
+        self.take().map(u16::from_le_bytes)
     }
 
     fn read_u32(&mut self) -> Result<u32, CakeError> {
@@ -164,7 +193,7 @@ impl Reader<'_> {
 /// A placeholder until sourced models arrive: a round cake with a slice missing, under a smaller
 /// tier set off center.
 pub fn build_slice_missing_cake() -> CakeModel {
-    let mut model = CakeModel { mesh: Mesh::default(), colors: Vec::new(), hulls: Vec::new() };
+    let mut model = CakeModel { mesh: Mesh::default(), skin: Skin::Plain, hulls: Vec::new() };
     let missing_slice_start = 290.0_f32.to_radians();
     let split = missing_slice_start / 2.0;
     for (angle0, angle1) in [(0.0, split), (split, missing_slice_start)] {
@@ -183,7 +212,7 @@ pub fn build_slice_missing_cake() -> CakeModel {
         calc_arc_outline(top_center, 0.055, 0.0, TAU * (1.0 - 1.0 / segments_per_turn), point_len)
     };
     add_prism(&mut model, build_top_outline, 0.07, 0.12);
-    CakeModel::build_plain(model.mesh, model.hulls)
+    model
 }
 
 /// Adds a convex prism to the mesh, and a coarser copy as one of the collider's hulls.

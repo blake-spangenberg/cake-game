@@ -61,7 +61,7 @@ async function startRound(): Promise<void> {
   game.free();
   game = new Game(roundTicks, file);
   controls.reset(game.get_knife_pose()[0]);
-  scene.resetCake(game);
+  await scene.resetCake(game);
   cutting = null;
   result.hidden = true;
 }
@@ -138,5 +138,5 @@ picker.addEventListener("change", () => {
   picker.blur();
   void startRound();
 });
-scene.resetCake(game);
+await scene.resetCake(game);
 requestAnimationFrame(onFrame);

@@ -1,28 +1,30 @@
 #!/usr/bin/env -S uv run --locked --script
 # /// script
 # requires-python = ">=3.13"
-# dependencies = ["click", "fast-simplification", "manifold3d", "networkx", "numpy", "pillow", "pymeshfix", "rtree", "scipy", "trimesh"]
+# dependencies = ["click", "fast-simplification", "libigl", "manifold3d", "networkx", "numpy", "pillow", "pymeshfix", "rtree", "scipy", "trimesh", "xatlas"]
 # ///
 """Repairs a sourced .glb into one closed, outward-wound solid resting on y = 0 and centered
-on the stand, scaled so its longest side is `--size-m`, carrying the source's coloring as
-per-vertex sRGB colors. `bake-cake` turns the result into a playable cake, so rejection of what
-this cannot fix happens there and here.
+on the stand, scaled so its longest side is `--size-m`, carrying the source's coloring as a
+texture baked at full detail onto a fresh UV atlas. `bake-cake` turns the result into a playable
+cake, so rejection of what this cannot fix happens there and here.
 
 Run `uv lock --script tools/repair-model.py` after changing the dependencies above.
 """
 
 import math
 from pathlib import Path
+from typing import NamedTuple
 
 import click
+import igl
 import manifold3d
 import numpy as np
 import pymeshfix
-import scipy.sparse
 import trimesh
+import xatlas
 from PIL import Image, ImageFilter
 
-__all__ = ["repair_model"]
+__all__ = ["Repaired", "repair_model", "sample_bilinear"]
 
 # The vertex snapping grid, as a share of the model's longest side.
 _WELD_RATIO = 1e-4
@@ -34,20 +36,14 @@ _KEPT_SIZE_RATIO = 0.99
 _DEBRIS_VOLUME_RATIO = 0.01
 # The default triangle budget: the bake's collider decomposition takes minutes on a model far over it.
 _DEFAULT_MAX_TRIANGLES = 40000
-_DEFAULT_SMOOTH_PASSES = 2
-# Two vertex colors this far apart (distance in sRGB, 0 to 1 per channel) barely smooth into each other.
-_SMOOTH_COLOR_SIGMA = 0.15
-# Lighting baked into a scan varies slowly across a surface, while detail (a seam, an eye) is finer than
-# the first radius, so delighting keeps the brightness relative to this neighborhood's average and sets
-# the neighborhood to the whole region's average, which is about as wide as the model.
-_DELIGHT_FINE_RADIUS_M = 0.02
-_DELIGHT_REGION_RADIUS_M = 0.25
-# Brightness steps beyond this many natural-log units stop the delighting average, so a real change of
-# material (a white sole under a black upper) bounds a region instead of blending as if it were lighting.
-_DELIGHT_EDGE_SIGMA = 0.3
-# The most delighting may brighten or darken a vertex, as a factor.
-_DELIGHT_MAX_GAIN = 2.0
-_LUMA_WEIGHTS = np.array([0.2126, 0.7152, 0.0722])
+# The side of the baked texture in texels. At 2048 a 0.24 m model gets texels of about 0.2 mm,
+# finer than the screen resolves it at any zoom the camera allows and about as fine as the sources.
+_DEFAULT_TEXTURE_SIZE = 2048
+# Empty texels between charts, so a mipmapped lookup near a chart's edge reads only that chart.
+_CHART_PADDING_TEXELS = 4
+# How far each chart's colors spread into the gutter around it, so filtering at a seam never
+# reads the fill between charts.
+_GUTTER_TEXELS = 2 * _CHART_PADDING_TEXELS
 
 
 def _fetch_parts(path: Path) -> list[trimesh.Trimesh]:
@@ -176,19 +172,41 @@ def _get_color_factor(part: trimesh.Trimesh) -> np.ndarray:
 
 
 def _prefilter_texture(part: trimesh.Trimesh, texture: Image.Image, spacing: float) -> Image.Image:
-    """The texture blurred to the footprint of one output vertex, `spacing` apart in the part's units.
+    """The texture blurred to the footprint of one output texel, `spacing` across in the part's units.
 
-    Reading a texture at one point per vertex aliases any pattern finer than the vertex spacing into
-    blotches, so the texture is low-passed first, as a mipmap would be. The blur is sized by how many
-    texels cover a unit of surface, which is the part's surface area over its UV area.
+    Reading a texture at one point per output texel aliases any pattern finer than that texel into
+    blotches, so a source finer than the output is low-passed first, as a mipmap would be, and one as
+    coarse or coarser is read as is. The blur is sized by how many texels cover a unit of surface,
+    which is the part's surface area over its UV area.
     """
     uvs = part.visual.uv[part.faces]
     legs = uvs[:, 1:] - uvs[:, :1]
     uv_area = 0.5 * np.abs(legs[:, 0, 0] * legs[:, 1, 1] - legs[:, 0, 1] * legs[:, 1, 0]).sum()
     if uv_area <= 0:
         return texture
-    texel_len = math.sqrt(part.area / (uv_area * texture.width * texture.height))
-    return texture.filter(ImageFilter.GaussianBlur(radius=0.5 * spacing / texel_len))
+    radius = 0.5 * spacing / math.sqrt(part.area / (uv_area * texture.width * texture.height))
+    return texture if radius < 0.5 else texture.filter(ImageFilter.GaussianBlur(radius=radius))
+
+
+def sample_bilinear(image: Image.Image, uvs: np.ndarray) -> np.ndarray:
+    """The image's sRGB colors at `uvs` (trimesh's, with v up) filtered as a GPU does, texel centers
+    at half-texel offsets and wrapping at the edges as glTF's default sampler repeats. trimesh's own
+    sampler puts the image's edge texels' centers on the UV square's edges, which shifts every
+    lookup by up to half a texel."""
+    pixels = np.asarray(image.convert("RGB"), dtype=np.float64)
+    rows, cols = pixels.shape[:2]
+    x = uvs[:, 0] * cols - 0.5
+    y = (1.0 - uvs[:, 1]) * rows - 0.5
+    x0, y0 = np.floor(x), np.floor(y)
+    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
+    x0, y0 = x0.astype(np.int64), y0.astype(np.int64)
+
+    def texel(dx: int, dy: int) -> np.ndarray:
+        return pixels[(y0 + dy) % rows, (x0 + dx) % cols]
+
+    top = texel(0, 0) * (1 - fx) + texel(1, 0) * fx
+    bottom = texel(0, 1) * (1 - fx) + texel(1, 1) * fx
+    return top * (1 - fy) + bottom * fy
 
 
 def _sample_part_colors(part: trimesh.Trimesh, face_ids: np.ndarray, points: np.ndarray, spacing: float) -> np.ndarray:
@@ -198,17 +216,20 @@ def _sample_part_colors(part: trimesh.Trimesh, face_ids: np.ndarray, points: np.
     texture = _fetch_texture(part)
     if texture is not None:
         uvs = np.einsum("ni,nij->nj", bary, visual.uv[part.faces[face_ids]])
-        texels = trimesh.visual.color.uv_to_interpolated_color(uvs, _prefilter_texture(part, texture, spacing))[:, :3]
+        texels = sample_bilinear(_prefilter_texture(part, texture, spacing), uvs)
         return _linear_to_srgb_u8(_srgb_u8_to_linear(texels) * _get_color_factor(part))
     if isinstance(visual, trimesh.visual.TextureVisuals):
         return np.tile(_linear_to_srgb_u8(_get_color_factor(part)), (len(points), 1))
     corner_colors = np.asarray(visual.vertex_colors, dtype=np.float64)[part.faces[face_ids]][:, :, :3]
-    return np.round(np.einsum("ni,nij->nj", bary, corner_colors)).astype(np.uint8)
+    return np.round(np.einsum("ni,nij->nj", np.clip(bary, 0.0, 1.0), corner_colors)).astype(np.uint8)
 
 
 def _sample_colors(parts: list[trimesh.Trimesh], points: np.ndarray, spacing: float) -> np.ndarray:
     """The sRGB color of the source model, averaged over `spacing`, at the surface point nearest each of `points`."""
-    closest, _, face_ids = trimesh.proximity.closest_point(_merge(parts), points)
+    merged = _merge(parts)
+    _, face_ids, closest = igl.point_mesh_squared_distance(
+        np.asarray(points, dtype=np.float64), np.asarray(merged.vertices, dtype=np.float64), np.asarray(merged.faces, dtype=np.int64)
+    )
     face_counts = [len(part.faces) for part in parts]
     face_starts = np.cumsum([0, *face_counts])
     part_ids = np.repeat(np.arange(len(parts)), face_counts)[face_ids]
@@ -220,58 +241,104 @@ def _sample_colors(parts: list[trimesh.Trimesh], points: np.ndarray, spacing: fl
     return colors
 
 
-def _build_affinity(mesh: trimesh.Trimesh, features: np.ndarray, sigma: float) -> scipy.sparse.csr_matrix:
-    """How alike each pair of edge-adjacent vertices count: 1 for equal `features`, falling to 0 over a few `sigma`."""
-    flat = features.reshape(len(features), -1)
-    edges = mesh.edges_unique
-    gaps = np.linalg.norm(flat[edges[:, 0]] - flat[edges[:, 1]], axis=1)
-    weights = np.exp(-(gaps**2) / (2 * sigma**2))
-    half = scipy.sparse.coo_matrix((weights, (edges[:, 0], edges[:, 1])), shape=(len(mesh.vertices),) * 2)
-    return (half + half.T).tocsr()
+class _Atlas(NamedTuple):
+    """A mesh cut into charts laid flat in one square texture: the source vertex each output vertex
+    copies, the triangles over the output vertices, and each output vertex's UV."""
+
+    source_vertex_ids: np.ndarray
+    faces: np.ndarray
+    uvs: np.ndarray
 
 
-def _diffuse(values: np.ndarray, affinity: scipy.sparse.csr_matrix, passes: int) -> np.ndarray:
-    """Replaces each vertex's value with the affinity-weighted mean of itself and its neighbors, `passes` times."""
-    weight_sums = 1.0 + np.asarray(affinity.sum(axis=1)).ravel()
-    for _ in range(passes):
-        values = (values + affinity @ values) / weight_sums[:, None]
-    return values
+def _build_atlas(mesh: trimesh.Trimesh, texture_size: int) -> _Atlas:
+    atlas = xatlas.Atlas()
+    atlas.add_mesh(np.asarray(mesh.vertices, dtype=np.float32), np.asarray(mesh.faces, dtype=np.uint32))
+    pack_options = xatlas.PackOptions()
+    pack_options.resolution = texture_size
+    pack_options.padding = _CHART_PADDING_TEXELS
+    pack_options.bilinear = True
+    atlas.generate(pack_options=pack_options)
+    if atlas.atlas_count != 1:
+        raise click.ClickException(f"the texture atlas took {atlas.atlas_count} pages instead of one")
+    return _Atlas(*atlas[0])
 
 
-def _delight(mesh: trimesh.Trimesh, colors: np.ndarray, strength: float, meters_per_unit: float) -> np.ndarray:
-    """The colors with the slow brightness trend divided out, by `strength` from 0 to 1.
-
-    A scan bakes its lighting into the texture as soft gradients and shadows far wider than the detail
-    it should show. Brightness is averaged over a fine neighborhood and over a region as wide as the
-    model, neither crossing a sharp brightness step, and each vertex is scaled by the ratio of the region
-    average to its neighborhood average. A region that shades from light to dark comes out one brightness
-    with its detail intact. The radii are approximate: a pass of the average spreads about one edge length.
-    """
-    linear = _srgb_u8_to_linear(colors.astype(np.float64))
-    luma = np.maximum(linear @ _LUMA_WEIGHTS, 1e-3)
-    affinity = _build_affinity(mesh, np.log(luma), _DELIGHT_EDGE_SIGMA)
-    edge_m = float(mesh.edges_unique_length.mean()) * meters_per_unit
-    fine_passes, region_passes = (math.ceil((radius_m / edge_m) ** 2) for radius_m in (_DELIGHT_FINE_RADIUS_M, _DELIGHT_REGION_RADIUS_M))
-    fine = _diffuse(luma[:, None], affinity, fine_passes)
-    region = _diffuse(fine, affinity, region_passes - fine_passes)
-    gain = np.clip((region / fine) ** strength, 1 / _DELIGHT_MAX_GAIN, _DELIGHT_MAX_GAIN)
-    return _linear_to_srgb_u8(linear * gain)
+def _cross(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    return u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]
 
 
-def _smooth_colors(mesh: trimesh.Trimesh, colors: np.ndarray, passes: int) -> np.ndarray:
-    """The colors averaged with those of similar-colored neighbors, so speckle goes and a real color edge stays."""
-    srgb = colors / 255.0
-    smoothed = _diffuse(srgb, _build_affinity(mesh, srgb, _SMOOTH_COLOR_SIGMA), passes)
-    return np.round(np.clip(smoothed, 0.0, 1.0) * 255).astype(np.uint8)
+def _rasterize(corners: np.ndarray, size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The texels of a `size` square image whose centers the triangles cover, as flat indices with
+    row 0 at the top, the triangle covering each, and the texel center's barycentric coordinates in
+    it. `corners` holds each triangle's three corners in texels, x to the right and y down."""
+    lower = np.clip(np.ceil(corners.min(axis=1) - 0.5), 0, size - 1).astype(np.int64)
+    upper = np.clip(np.floor(corners.max(axis=1) - 0.5), 0, size - 1).astype(np.int64)
+    spans = np.maximum(upper - lower + 1, 0)
+    counts = spans[:, 0] * spans[:, 1]
+    tri_ids = np.repeat(np.arange(len(corners)), counts)
+    offsets = np.arange(len(tri_ids)) - np.repeat(np.cumsum(counts) - counts, counts)
+    cols = lower[tri_ids, 0] + offsets % spans[tri_ids, 0]
+    rows = lower[tri_ids, 1] + offsets // spans[tri_ids, 0]
+    centers = np.stack([cols + 0.5, rows + 0.5], axis=1)
+    a, b, c = (corners[tri_ids, k] for k in range(3))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bary = np.stack([_cross(b - centers, c - centers), _cross(c - centers, a - centers), _cross(a - centers, b - centers)], axis=1)
+        bary /= _cross(b - a, c - a)[:, None]
+    is_inside = np.isfinite(bary).all(axis=1) & (bary >= -1e-6).all(axis=1)
+    return rows[is_inside] * size + cols[is_inside], tri_ids[is_inside], bary[is_inside]
 
 
-def _rest_on_stand(mesh: trimesh.Trimesh, size_m: float) -> trimesh.Trimesh:
-    """Scaled so the longest side is `size_m`, centered over the origin, with its lowest point at y = 0."""
-    placed = mesh.copy()
-    lower, upper = placed.bounds
-    placed.apply_translation(-np.array([(lower[0] + upper[0]) / 2, lower[1], (lower[2] + upper[2]) / 2]))
-    placed.apply_scale(size_m / float(placed.extents.max()))
-    return placed
+def _fill_gutter(image: np.ndarray, is_covered: np.ndarray) -> np.ndarray:
+    """The image with each chart's edge colors spread `_GUTTER_TEXELS` into the empty texels around
+    it, and the empty texels farther out set to the average color, which compresses best."""
+    image, is_covered = image.astype(np.float64), is_covered.copy()
+    rows, cols = is_covered.shape
+    for _ in range(_GUTTER_TEXELS):
+        padded = np.pad(image * is_covered[..., None], ((1, 1), (1, 1), (0, 0)))
+        padded_covered = np.pad(is_covered, 1).astype(np.float64)
+        sums, counts = np.zeros_like(image), np.zeros(is_covered.shape)
+        for dy in range(3):
+            for dx in range(3):
+                sums += padded[dy : dy + rows, dx : dx + cols]
+                counts += padded_covered[dy : dy + rows, dx : dx + cols]
+        is_new = ~is_covered & (counts > 0)
+        image[is_new] = sums[is_new] / counts[is_new, None]
+        is_covered |= is_new
+    image[~is_covered] = image[is_covered].mean(axis=0)
+    return np.round(image).astype(np.uint8)
+
+
+def _bake_texture(parts: list[trimesh.Trimesh], positions: np.ndarray, atlas: _Atlas, texture_size: int) -> Image.Image:
+    """The source model's color at each texel of the atlas laid over `positions`, read from the
+    nearest point of the source surface at the source's full detail."""
+    corners = atlas.uvs[atlas.faces] * texture_size
+    corners[..., 1] = texture_size - corners[..., 1]
+    texel_ids, tri_ids, bary = _rasterize(corners, texture_size)
+    points = np.einsum("ni,nij->nj", bary, positions[atlas.faces[tri_ids]])
+    texel_len = math.sqrt(float(trimesh.triangles.area(positions[atlas.faces]).sum()) / len(texel_ids))
+    flat_image = np.zeros((texture_size * texture_size, 3), dtype=np.uint8)
+    flat_image[texel_ids] = _sample_colors(parts, points, texel_len)
+    is_covered = np.zeros(texture_size * texture_size, dtype=bool)
+    is_covered[texel_ids] = True
+    shape = (texture_size, texture_size)
+    return Image.fromarray(_fill_gutter(flat_image.reshape(*shape, 3), is_covered.reshape(shape)))
+
+
+def _place_on_stand(mesh: trimesh.Trimesh, size_m: float) -> np.ndarray:
+    """The transform that scales the mesh's longest side to `size_m`, centers it over the origin,
+    and puts its lowest point at y = 0."""
+    lower, upper = mesh.bounds
+    center = np.array([(lower[0] + upper[0]) / 2, lower[1], (lower[2] + upper[2]) / 2])
+    scale = trimesh.transformations.scale_matrix(size_m / float(mesh.extents.max()))
+    return scale @ trimesh.transformations.translation_matrix(-center)
+
+
+class Repaired(NamedTuple):
+    """The repaired model as one closed solid, and the same surface cut along its texture seams
+    and textured, as the glb holds it."""
+
+    solid: trimesh.Trimesh
+    textured: trimesh.Trimesh
 
 
 def repair_model(
@@ -280,22 +347,23 @@ def repair_model(
     size_m: float,
     should_keep_largest: bool,
     max_triangles: int = _DEFAULT_MAX_TRIANGLES,
-    smooth_passes: int = _DEFAULT_SMOOTH_PASSES,
-    delight: float = 0.0,
-) -> trimesh.Trimesh:
-    """Writes `destination` as a closed, outward-wound, single-piece glb of at most about `max_triangles` triangles and returns the mesh."""
+    texture_size: int = _DEFAULT_TEXTURE_SIZE,
+) -> Repaired:
+    """Writes `destination` as a closed, outward-wound, single-piece textured glb of at most about `max_triangles` triangles."""
     parts = _fetch_parts(source)
-    solid = _decimate(_build_solid(parts, should_keep_largest), max_triangles)
-    colored = _to_trimesh(solid)
-    colors = _sample_colors(parts, colored.vertices, float(colored.edges_unique_length.mean()))
-    if delight > 0:
-        colors = _delight(colored, colors, delight, size_m / float(colored.extents.max()))
-    colored.visual = trimesh.visual.ColorVisuals(colored, vertex_colors=_smooth_colors(colored, colors, smooth_passes))
-    repaired = _rest_on_stand(colored, size_m)
-    if not (repaired.is_watertight and repaired.is_winding_consistent and repaired.volume > 0):
+    solid = _to_trimesh(_decimate(_build_solid(parts, should_keep_largest), max_triangles))
+    atlas = _build_atlas(solid, texture_size)
+    positions = np.asarray(solid.vertices)[atlas.source_vertex_ids]
+    texture = _bake_texture(parts, positions, atlas, texture_size)
+    material = trimesh.visual.material.PBRMaterial(baseColorTexture=texture, metallicFactor=0.0)
+    visual = trimesh.visual.TextureVisuals(uv=atlas.uvs, material=material)
+    textured = trimesh.Trimesh(positions, atlas.faces, visual=visual, process=False)
+    placement = _place_on_stand(solid, size_m)
+    repaired = Repaired(solid.apply_transform(placement), textured.apply_transform(placement))
+    if not (repaired.solid.is_watertight and repaired.solid.is_winding_consistent and repaired.solid.volume > 0):
         raise click.ClickException(f"{source}: repair left a mesh that is not a closed, outward-wound solid")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    repaired.export(destination, file_type="glb")
+    repaired.textured.export(destination, file_type="glb", extension_webp=True)
     return repaired
 
 
@@ -305,14 +373,11 @@ def repair_model(
 @click.option("--size-m", default=0.24, show_default=True, help="Longest side of the repaired model, in meters.")
 @click.option("--keep-largest", is_flag=True, help="Keep only the biggest piece when several remain, such as one of a pair.")
 @click.option("--max-triangles", default=_DEFAULT_MAX_TRIANGLES, show_default=True, help="Decimate a model with more triangles down to this.")
-@click.option("--smooth-colors", "smooth_passes", default=_DEFAULT_SMOOTH_PASSES, show_default=True, help="Edge-preserving smoothing passes over the vertex colors, 0 for none.")
-@click.option("--delight", type=click.FloatRange(0.0, 1.0), default=0.0, show_default=True, help="How much of the lighting baked into a scan's texture to remove, 0 for none and 1 for all of it.")
-def main(
-    source: Path, destination: Path, size_m: float, keep_largest: bool, max_triangles: int, smooth_passes: int, delight: float
-) -> None:
-    repaired = repair_model(source, destination, size_m, keep_largest, max_triangles, smooth_passes, delight)
-    extents = np.round(repaired.extents, 3).tolist()
-    click.echo(f"{destination}: {len(repaired.faces)} triangles, extents {extents} m, volume {repaired.volume:.6f} m3")
+@click.option("--texture-size", default=_DEFAULT_TEXTURE_SIZE, show_default=True, help="Side of the baked square texture, in texels.")
+def main(source: Path, destination: Path, size_m: float, keep_largest: bool, max_triangles: int, texture_size: int) -> None:
+    solid = repair_model(source, destination, size_m, keep_largest, max_triangles, texture_size).solid
+    extents = np.round(solid.extents, 3).tolist()
+    click.echo(f"{destination}: {len(solid.faces)} triangles, extents {extents} m, volume {solid.volume:.6f} m3")
 
 
 if __name__ == "__main__":
