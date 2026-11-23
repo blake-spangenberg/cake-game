@@ -9,9 +9,11 @@ const MAX_TICKS_PER_FRAME = 5;
 /** Frames beyond the simulation's tick rate would show nothing new, so they are not drawn. */
 const MAX_FRAMES_PER_S = 60;
 const CUT_DESCEND_S = 0.4;
-const CUT_ROCK_S = 0.4;
+const CUT_ROCK_S = 1.2;
 /** How far the knife rocks either way through the cut, a gentle mezzaluna rock. */
-const CUT_ROCK_RAD = 0.18;
+const CUT_ROCK_RAD = 0.36;
+/** Extra rock time, as a share of `CUT_ROCK_S`, for the knife to swing a little past center and settle. */
+const CUT_SETTLE_SHARE = 0.5;
 
 await init();
 const layout = get_layout();
@@ -52,15 +54,28 @@ function startCut(split: Float64Array, nowMs: number): void {
   scene.showHalves(game);
 }
 
-/** Sweeps the knife down through the cake, rocks it once, then parts the halves and shows the result. */
+/**
+ * The knife's tilt in radians, given how far through its rock it is: 0 to 1 for one full
+ * back-and-forth, then up to `1 + CUT_SETTLE_SHARE` for the swing past center and back. The settle
+ * continues the same sine under a fade from 1 to 0 with no slope at either end, so it neither
+ * jumps nor stops abruptly, and swings out to about an eighth of the rock's extent.
+ */
+function calcRockRad(rock: number): number {
+  const settle = Math.max(rock - 1, 0) / CUT_SETTLE_SHARE;
+  const fade = settle >= 1 ? 0 : ((1 + Math.cos(Math.PI * settle)) / 2) ** 3;
+  return CUT_ROCK_RAD * Math.sin(2 * Math.PI * rock) * fade;
+}
+
+/** Sweeps the knife down through the cake, rocks it and lets it settle, then parts the halves and shows the result. */
 function animateCut(nowMs: number): void {
   const cut = cutting!;
   const elapsedS = (nowMs - cut.startMs) / 1000;
   const descend = Math.min(elapsedS / CUT_DESCEND_S, 1);
-  const rock = THREE.MathUtils.clamp((elapsedS - CUT_DESCEND_S) / CUT_ROCK_S, 0, 1);
+  const rockEnd = 1 + CUT_SETTLE_SHARE;
+  const rock = THREE.MathUtils.clamp((elapsedS - CUT_DESCEND_S) / CUT_ROCK_S, 0, rockEnd);
   const lowerM = cut.fromLowerM + (cut.toLowerM - cut.fromLowerM) * descend * descend;
-  scene.placeKnife(game, lowerM, CUT_ROCK_RAD * Math.sin(2 * Math.PI * rock));
-  if (rock < 1 || !result.hidden) return;
+  scene.placeKnife(game, lowerM, calcRockRad(rock));
+  if (rock < rockEnd || !result.hidden) return;
   scene.partHalves();
   const [above, below, points] = cut.split;
   const [aboveG, belowG] = [above, below].map((m3) => Math.round(m3 * layout.density_g_per_m3));

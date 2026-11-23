@@ -1,5 +1,5 @@
 [workspace]
-members = ["src/core", "src/wasm"]
+members = ["src/bake", "src/core", "src/wasm"]
 resolver = "3"
 
 [workspace.package]

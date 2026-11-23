@@ -22,6 +22,12 @@ const HAND_HALF_LIFE_S = 0.08;
 const KNIFE_HALF_LIFE_S = 0.05;
 const KNIFE_RETURN_HALF_LIFE_S = 0.3;
 const STAND_HALF_LIFE_S = 0.08;
+/**
+ * How far the stand's input may run ahead of the stand itself. The core turns the stand at a
+ * limited speed, so without this a fast circling drag piles up input the stand keeps working off
+ * long after the mouse is released.
+ */
+const STAND_MAX_LEAD_RAD = 0.5;
 /** Nudge used to find which way on screen a control moves an object. */
 const PROBE_STEP = 0.01;
 
@@ -86,7 +92,9 @@ export class Controls {
     const [knifeTiltRad, knifeLowerM] = game.get_knife_pose();
     if (Math.abs(knifeTiltRad - this.sentTiltRad) > this.layout.angle_unit_rad / 2) this.tilt.snap(knifeTiltRad);
     if (knifeLowerM < this.sentLowerM - this.layout.position_unit_m / 2) this.lower.capAt(knifeLowerM + LOWER_SLACK_M);
-    if (game.is_stand_blocked()) this.stand.snap(game.get_stand_angle_rad());
+    const standRad = game.get_stand_angle_rad();
+    if (game.is_stand_blocked()) this.stand.snap(standRad);
+    this.stand.target = THREE.MathUtils.clamp(this.stand.target, standRad - STAND_MAX_LEAD_RAD, standRad + STAND_MAX_LEAD_RAD);
     const encoded = new Int32Array(ENCODED_LEN);
     const [handX, handZ] = [this.handX.step(dtS), this.handZ.step(dtS)];
     if (this.drag?.kind === "cake") {

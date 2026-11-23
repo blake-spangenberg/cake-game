@@ -35,6 +35,7 @@ test: wasm
 	cargo clippy --all-targets -- -D warnings
 	cargo test
 	cd src/client && npm run check
+	uv run --locked --script tools/test-repair-model.py
 	cargo run -q --release -p cake-core --example replay > build/replay-native.txt
 	node tools/replay-wasm.mjs > build/replay-wasm.txt
 	diff build/replay-native.txt build/replay-wasm.txt

@@ -71,6 +71,8 @@ The reveal is dramatic, with pomp and circumstance, and is worth a round running
     - cakes that are asymmetric as sourced
     - damage to a sourced cake: a missing slice, a bite, a collapsed tier
     - models that were never meant to be cakes (e.g. a rubber duck with a scarf), whose cake nature shows only when the cut exposes the layers inside
+        - Any object works (a rubber duck, an eggplant, a car) as long as a cake decorating expert could plausibly bake and carve a cake in that shape. Reject shapes with thin or floating parts a real cake could not hold
+        - Cakes must be asymmetric enough that centering the cake and zeroing the knife is not the whole game: a round cake or any centrally symmetric shape is too easy. Prefer lopsided, irregular shapes, and favor the owner's ideas: one sneaker, an L-shaped sectional couch, a potato or eggplant, an oven mitt, a chicken nugget or tender, a wooden log, a lucky cat (maneki-neko), a yellow rain boot
 - Cut faces show the cake inside, as sponge layers separated by frosting, since the secret-cake reveal depends on it.
 - Every cake fits within the cutting region, and the blade spans the whole region at every tilt and heading, so no cake limits which cuts can reach it. Mind the knife-to-cake size ratio across the whole set.
 

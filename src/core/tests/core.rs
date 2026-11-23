@@ -1,4 +1,4 @@
-use cake_core::cakes::build_slice_missing_cake;
+use cake_core::cakes::{CakeError, CakeModel, MAX_HULL_VERTICES, build_slice_missing_cake};
 use cake_core::cut::{Plane, Split, calc_split};
 use cake_core::input::{HandInput, Input, InputError, KnifeInput, quantize_meters, quantize_radians};
 use cake_core::knife::{Knife, START_KNIFE, Solid, calc_edge_rise_m};
@@ -35,6 +35,92 @@ fn to_dvec3s(mesh: &Mesh) -> Vec<DVec3> {
 #[test]
 fn placeholder_cake_is_closed() {
     assert_eq!(build_slice_missing_cake().mesh.validate_closed(), Ok(()));
+}
+
+/// A box resting on y = 0 and centered on the stand, with a matching hull.
+fn build_box_cake(half_x_m: f32, height_m: f32, half_z_m: f32) -> CakeModel {
+    let mesh = build_box([-half_x_m, 0.0, -half_z_m], [half_x_m, height_m, half_z_m]);
+    let hull = mesh.positions.clone();
+    CakeModel { mesh, hulls: vec![hull] }
+}
+
+#[test]
+fn placeholder_cake_validates() {
+    assert_eq!(build_slice_missing_cake().validate(), Ok(()));
+}
+
+#[test]
+fn cake_file_round_trips() {
+    let model = build_slice_missing_cake();
+    assert_eq!(CakeModel::decode(&model.encode()), Ok(model));
+}
+
+#[test]
+fn cake_file_rejects_damaged_bytes() {
+    let bytes = build_slice_missing_cake().encode();
+    assert_eq!(CakeModel::decode(&bytes[..bytes.len() - 1]), Err(CakeError::BadFile));
+    assert_eq!(CakeModel::decode(&[bytes.as_slice(), &[0]].concat()), Err(CakeError::BadFile));
+    assert_eq!(CakeModel::decode(&bytes[1..]), Err(CakeError::BadFile));
+    let mut wrong_version = bytes.clone();
+    wrong_version[4] ^= 1;
+    assert_eq!(CakeModel::decode(&wrong_version), Err(CakeError::BadFile));
+}
+
+#[test]
+fn cake_file_rejects_an_unplayable_model() {
+    let mut model = build_box_cake(0.05, 0.05, 0.05);
+    model.mesh.triangles.pop();
+    assert!(matches!(CakeModel::decode(&model.encode()), Err(CakeError::Mesh(MeshError::OpenEdge { .. }))));
+}
+
+#[test]
+fn validate_accepts_a_box_and_names_what_is_wrong_otherwise() {
+    assert_eq!(build_box_cake(0.05, 0.05, 0.05).validate(), Ok(()));
+
+    let mut inside_out = build_box_cake(0.05, 0.05, 0.05);
+    inside_out.mesh.triangles.iter_mut().for_each(|triangle| triangle.swap(1, 2));
+    assert_eq!(inside_out.validate(), Err(CakeError::NotOutward));
+
+    let too_long_m = MAX_CAKE_EXTENT_M as f32 + 0.01;
+    assert_eq!(build_box_cake(0.05, too_long_m, 0.05).validate(), Err(CakeError::TooLong));
+
+    let mut floating = build_box_cake(0.05, 0.05, 0.05);
+    floating.mesh.positions.iter_mut().for_each(|p| p.y += 0.01);
+    assert_eq!(floating.validate(), Err(CakeError::OffPlate));
+    let mut off_center = build_box_cake(0.05, 0.05, 0.05);
+    off_center.mesh.positions.iter_mut().for_each(|p| p.x += STAND_RADIUS_M as f32);
+    assert_eq!(off_center.validate(), Err(CakeError::OffPlate));
+
+    let mut hull_free = build_box_cake(0.05, 0.05, 0.05);
+    hull_free.hulls.clear();
+    assert_eq!(hull_free.validate(), Err(CakeError::BadHull { hull_idx: 0 }));
+    let mut flat_hull = build_box_cake(0.05, 0.05, 0.05);
+    flat_hull.hulls[0] = vec![Vec3::ZERO; 4];
+    assert_eq!(flat_hull.validate(), Err(CakeError::BadHull { hull_idx: 0 }));
+    let mut fine_hull = build_box_cake(0.05, 0.05, 0.05);
+    fine_hull.hulls[0] = (0..MAX_HULL_VERTICES as u32 + 1)
+        .map(|i| {
+            let angle = i as f32 * 0.3;
+            Vec3::new(0.05 * angle.cos(), 0.05 + 0.01 * (i % 2) as f32, 0.05 * angle.sin())
+        })
+        .collect();
+    assert_eq!(fine_hull.validate(), Err(CakeError::BadHull { hull_idx: 0 }));
+}
+
+#[test]
+fn mesh_with_a_stray_index_is_rejected() {
+    let mut mesh = build_box([0.0; 3], [1.0; 3]);
+    mesh.triangles[3][1] = 99;
+    assert_eq!(mesh.validate_closed(), Err(MeshError::IndexOutOfRange { triangle_idx: 3 }));
+}
+
+#[test]
+fn mesh_with_three_triangles_on_an_edge_is_non_manifold() {
+    let mesh = Mesh {
+        positions: vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z, Vec3::NEG_Z],
+        triangles: vec![[0, 1, 2], [1, 0, 3], [1, 0, 4]],
+    };
+    assert_eq!(mesh.validate_closed(), Err(MeshError::NonManifoldEdge { from: 0, to: 1 }));
 }
 
 #[test]

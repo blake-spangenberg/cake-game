@@ -1,12 +1,14 @@
-//! Grabs the placeholder cake at a spread of surface points, lifts it, and drops it on the
-//! table, printing per grab how far its centroid traveled after the drop and when it last moved,
-//! for tuning against rolling away and wobbling forever.
+//! Grabs a cake at a spread of surface points, lifts it, and drops it on the table, printing per
+//! grab how far its centroid traveled after the drop and when it last moved, for tuning against
+//! rolling away and wobbling forever. Takes a baked `.cake` file as its argument, else uses the
+//! placeholder.
 
-use cake_core::cakes::build_slice_missing_cake;
 use cake_core::input::{HandInput, Input, KnifeInput, quantize_meters};
 use cake_core::knife::START_KNIFE;
 use cake_core::sim::{TICKS_PER_S, World};
 use cake_core::table::CAKE_SPAWN;
+
+mod common;
 
 const HOLD_TICKS: u32 = 90;
 const WATCH_TICKS: u32 = 600;
@@ -16,7 +18,7 @@ const STILL_SPEED_M_PER_S: f32 = 0.002;
 const STILL_SPIN_RAD_PER_S: f32 = 0.05;
 
 fn main() {
-    let model = build_slice_missing_cake();
+    let model = common::fetch_model();
     let tick_s = 1.0 / TICKS_PER_S as f32;
     println!("grab_x  grab_y  grab_z  roll_m  last_moving_s");
     let (mut worst_roll_m, mut worst_settle_s) = (0.0_f32, 0.0_f32);

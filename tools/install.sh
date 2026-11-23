@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ensures the Rust toolchain, Node, the pinned wasm-bindgen CLI, and the client's packages.
+# Ensures the Rust toolchain, Node, uv for the model tools, the pinned wasm-bindgen CLI, and the client's packages.
 set -euo pipefail
 shopt -s nullglob
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
@@ -33,6 +33,7 @@ ensure_wasm_bindgen() {
 
 ensure_winget_package rustup Rustlang.Rustup
 ensure_winget_package node OpenJS.NodeJS.LTS
+ensure_winget_package uv astral-sh.uv
 rustup toolchain install
 ensure_wasm_bindgen
 (cd src/client && npm install --no-audit --no-fund)

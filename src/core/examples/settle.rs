@@ -1,11 +1,13 @@
-//! Prints how the placeholder cake moves through a scripted carry, place, and stand turn, for
-//! tuning the physics against jitter: every 10 ticks, its position, speed, and spin.
+//! Prints how a cake moves through a scripted carry, place, and stand turn, for tuning the
+//! physics against jitter: every 10 ticks, its position, speed, and spin. Takes a baked `.cake`
+//! file as its argument, else uses the placeholder.
 
-use cake_core::cakes::build_slice_missing_cake;
 use cake_core::input::{ANGLE_UNIT_RAD, HandInput, Input, KnifeInput, quantize_radians};
 use cake_core::knife::START_KNIFE;
 use cake_core::replay::calc_spawned_top_grab_at;
 use cake_core::sim::{TICKS_PER_S, World};
+
+mod common;
 
 const CARRY_END_TICK: i32 = 150;
 const RELEASE_TICK: i32 = 300;
@@ -14,7 +16,7 @@ const TURN_TICKS: i32 = 60;
 const END_TICK: i32 = 800;
 
 fn main() {
-    let model = build_slice_missing_cake();
+    let model = common::fetch_model();
     let grab_at = calc_spawned_top_grab_at(&model);
     let start_tilt = quantize_radians(START_KNIFE.tilt_rad);
     let mut world = World::create(model, START_KNIFE, None);

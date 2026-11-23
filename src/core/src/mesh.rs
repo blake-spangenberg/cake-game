@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use rapier3d::math::Vec3;
 
 /// A triangle mesh in a cake's local frame, meters, counter-clockwise winding seen from outside.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mesh {
     pub positions: Vec<Vec3>,
     pub triangles: Vec<[u32; 3]>,
@@ -65,6 +65,12 @@ impl Mesh {
             }
         }
         Ok(())
+    }
+
+    /// The enclosed volume, negative when the mesh is wound inside out.
+    pub fn calc_signed_volume(&self) -> f64 {
+        let at = |i: u32| self.positions[i as usize].as_dvec3();
+        self.triangles.iter().map(|&[a, b, c]| at(a).dot(at(b).cross(at(c)))).sum::<f64>() / 6.0
     }
 
     pub fn calc_max_distance_from(&self, point: Vec3) -> f32 {

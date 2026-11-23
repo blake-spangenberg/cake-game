@@ -12,6 +12,8 @@ const LEG_INSET_M = 0.08;
 const LEG_LEN_M = 0.72;
 const RIM_BEAD_COUNT = 16;
 const HALF_GAP_M = 0.03;
+/** Clearance either side of the blade's faces in the cut, so neither half's cut face fights the blade's. */
+const BLADE_CLEARANCE_M = 0.0005;
 const HALF_GAP_HALF_LIFE_S = 0.12;
 /** Side of the plane drawn over a cut face, centered on the cake, larger than any cake's section. */
 const CAP_SIZE_M = 1;
@@ -99,7 +101,8 @@ export class Scene {
   }
 
   /**
-   * Swaps the whole cake for its two halves along the knife's plane, closed until `partHalves`.
+   * Swaps the whole cake for its two halves along the knife's plane, apart by just the blade's
+   * thickness until `partHalves`, so the blade shows in the cut as it plunges.
    * Each half's cut face is a sponge plane masked to the half's inside through the stencil
    * buffer, which works for any closed mesh without building cap geometry.
    */
@@ -107,7 +110,7 @@ export class Scene {
     const f = game.get_knife_frame();
     const normal = new THREE.Vector3(f[6], f[7], f[8]);
     const geometry = buildCakeGeometry(game);
-    this.halfGap.snap(0);
+    this.halfGap.snap(this.layout.blade_thickness_m / 2 + BLADE_CLEARANCE_M);
     for (const [idx, side] of [1, -1].entries()) {
       const keepNormal = normal.clone().multiplyScalar(side);
       const clip = new THREE.Plane().setFromNormalAndCoplanarPoint(keepNormal, this.pivot);
