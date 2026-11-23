@@ -3,7 +3,6 @@
 //!
 //! Usage: `bake-cake <model.glb> <out.cake>`
 
-use std::collections::HashMap;
 use std::process::ExitCode;
 use std::{env, fs};
 
@@ -53,8 +52,12 @@ fn bake(source: &str, destination: &str) -> Result<String, String> {
     Ok(format!("{} triangles, {} hulls with {hull_sizes:?} vertices", model.mesh.triangles.len(), model.hulls.len()))
 }
 
-/// The one triangle mesh of a repaired glb, welded back into a closed mesh where its texture
-/// seams split it, and its texture, in meters with the node transform ignored.
+/// The glb vertex attribute holding, for each vertex, the index of the closed solid's vertex it
+/// copies. `tools/repair-model.py` writes it.
+const SOLID_VERTEX_ATTRIBUTE: &str = "SOLID_VERTEX";
+
+/// The one triangle mesh of a repaired glb, rejoined into the closed solid its texture seams split,
+/// and its texture, in meters with the node transform ignored.
 fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Skin), String> {
     let glb = gltf::Gltf::from_slice(bytes).map_err(|error| format!("not a glb: {error}"))?;
     let blob = glb.blob.as_deref();
@@ -73,8 +76,14 @@ fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Skin), String> {
         return Err("the index count is not a multiple of 3".into());
     }
     let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0).ok_or("the mesh has no UVs")?.into_f32().collect();
-    if uvs.len() != split_positions.len() {
-        return Err("the mesh does not have one UV per vertex".into());
+    let solid_accessor = primitive
+        .get(&gltf::Semantic::Extras(SOLID_VERTEX_ATTRIBUTE.into()))
+        .ok_or("the mesh has no solid vertex ids; run tools/repair-model.py first")?;
+    let solid_ids: Vec<u32> = gltf::accessor::Iter::<u32>::new(solid_accessor, |_| blob)
+        .ok_or("the solid vertex ids are unreadable")?
+        .collect();
+    if uvs.len() != split_positions.len() || solid_ids.len() != split_positions.len() {
+        return Err("the mesh does not have one UV and one solid vertex id per vertex".into());
     }
     let mut images = glb.images();
     let (Some(image), None) = (images.next(), images.next()) else {
@@ -85,29 +94,33 @@ fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Skin), String> {
     };
     let image =
         blob.and_then(|blob| blob.get(view.offset()..view.offset() + view.length())).ok_or("the image is missing")?;
-    let (positions, welded_ids) = weld(&split_positions);
+    let positions = rejoin(&split_positions, &solid_ids)?;
     let split_triangles: Vec<[usize; 3]> =
         indices.chunks_exact(3).map(|corners| [0, 1, 2].map(|k| corners[k] as usize)).collect();
-    let triangles = split_triangles.iter().map(|corners| corners.map(|idx| welded_ids[idx])).collect();
+    let triangles = split_triangles.iter().map(|corners| corners.map(|idx| solid_ids[idx])).collect();
     let corner_uvs = split_triangles.iter().map(|corners| corners.map(|idx| quantize_uv(uvs[idx]))).collect();
     Ok((Mesh { positions, triangles }, Skin::Textured { corner_uvs, image: image.to_vec() }))
 }
 
-/// The distinct positions in first-seen order, and the index into them of each of `positions`.
-/// The repair copies a vertex exactly wherever a texture seam splits it, so equal bits mean one vertex.
-fn weld(positions: &[[f32; 3]]) -> (Vec<Vec3>, Vec<u32>) {
-    let mut ids_by_bits: HashMap<[u32; 3], u32> = HashMap::new();
-    let mut welded = Vec::new();
-    let ids = positions
-        .iter()
-        .map(|&position| {
-            *ids_by_bits.entry(position.map(f32::to_bits)).or_insert_with(|| {
-                welded.push(Vec3::from_array(position));
-                welded.len() as u32 - 1
-            })
+/// The solid's vertex positions, from the split vertices that copy them: `solid_ids` must name
+/// every solid vertex, and copies of one must agree.
+fn rejoin(split_positions: &[[f32; 3]], solid_ids: &[u32]) -> Result<Vec<Vec3>, String> {
+    let solid_len = solid_ids.iter().max().map_or(0, |&max| max as usize + 1);
+    let mut positions: Vec<Option<[f32; 3]>> = vec![None; solid_len];
+    for (&solid_id, &position) in solid_ids.iter().zip(split_positions) {
+        let slot = &mut positions[solid_id as usize];
+        if slot.is_some_and(|known| known != position) {
+            return Err(format!("the copies of solid vertex {solid_id} disagree on its position"));
+        }
+        *slot = Some(position);
+    }
+    positions
+        .into_iter()
+        .enumerate()
+        .map(|(solid_id, position)| {
+            position.map(Vec3::from_array).ok_or(format!("no vertex copies solid vertex {solid_id}"))
         })
-        .collect();
-    (welded, ids)
+        .collect()
 }
 
 fn quantize_uv(uv: [f32; 2]) -> [u16; 2] {

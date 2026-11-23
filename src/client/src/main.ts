@@ -36,7 +36,7 @@ const credit = document.querySelector<HTMLDivElement>("#credit")!;
 const scene = new Scene(canvas, layout);
 /** The camera orbits halfway between the resting knife's edge and the stand's plate. */
 const orbit = new Orbit(scene.camera, new THREE.Vector3(0, (layout.pivot_y_m + layout.stand_top_y_m) / 2, 0));
-picker.append(new Option("Random", RANDOM_CAKE), ...CAKES.map((cake) => new Option(cake.title, cake.id)));
+picker.append(new Option("Random", RANDOM_CAKE), ...CAKES.map((cake) => new Option(cake.name, cake.id)));
 const firstCake = pickCake();
 credit.replaceChildren(buildCreditHtml(firstCake));
 let game = new Game(roundTicks, await fetchCakeFile(firstCake));

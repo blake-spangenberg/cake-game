@@ -22,6 +22,7 @@ The game is intuitive, since it depicts a scenario that could exist in the real 
     - Press Cut! to lock in, cutting your cake in half
     - The winner is the player whose halves are most similar by weight
 - A credits page, reachable from the lobby, says the game is inspired by the German game show Schlag den Henssler, lists the license credits for every sourced asset, and names the author, Blake Spangenberg.
+- Each cake has a short in-game name the owner sets (Croissant, Grand Piano), not its source's title. Its credit line names the model's author, linked to the model's page, and its license, linked to the license's terms.
 - After the results, everyone returns to the lobby for the next round.
 
 ## Fairness
@@ -71,7 +72,7 @@ The reveal is dramatic, with pomp and circumstance, and is worth a round running
 - A model must look right at cake size: not so flat it reads as a slab, not built for a much smaller scale so its facets show, and not filled in solid where its real counterpart is hollow (the inside of a shoe).
 - Every cake is a whole object. Nothing already sliced, bitten, or cut, real cakes included: the first cut the player sees is their own.
 - A model keeps its real counterpart's asymmetry: one left or right shoe, never a mirrored one.
-- Sessions may recolor a model, keep one item of a pair, and trim a thin part a cake could not hold. Any reshaping (bending, adding a knot) needs the owner's approval.
+- Sessions may recolor a model, keep one item of a pair, trim a thin part a cake could not hold, and hollow a model whose real counterpart is hollow (the inside of a shoe). Any other reshaping (bending, adding a knot) needs the owner's approval.
 - Cakes are not limited to traditional looking ones, which are mostly symmetric. Steer away from simple geometric shapes and symmetric designs. Asymmetry comes from:
     - cakes that are asymmetric as sourced
     - models that were never meant to be cakes (e.g. a rubber duck with a scarf), whose cake nature shows only when the cut exposes the layers inside

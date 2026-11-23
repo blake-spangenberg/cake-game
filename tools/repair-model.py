@@ -23,8 +23,9 @@ import pymeshfix
 import trimesh
 import xatlas
 from PIL import Image, ImageFilter
+from scipy import ndimage, spatial
 
-__all__ = ["Repaired", "repair_model", "sample_bilinear"]
+__all__ = ["Finish", "Hollow", "Recolor", "Repaired", "repair_model", "sample_bilinear"]
 
 # The vertex snapping grid, as a share of the model's longest side.
 _WELD_RATIO = 1e-4
@@ -34,6 +35,10 @@ _MIN_SOLID_FACES = 4
 _KEPT_SIZE_RATIO = 0.99
 # A piece under this share of the model's volume is debris, dropped when it floats free.
 _DEBRIS_VOLUME_RATIO = 0.01
+# A piece that will not close is trim, dropped with a warning, when its convex hull holds under this
+# share of the whole model's: a fin, a string, a propped-open lid, thin parts no cake could hold.
+# A bulkier one fails the repair.
+_TRIM_HULL_VOLUME_RATIO = 0.03
 # The default triangle budget: the bake's collider decomposition takes minutes on a model far over it.
 _DEFAULT_MAX_TRIANGLES = 40000
 # The side of the baked texture in texels. At 2048 a 0.24 m model gets texels of about 0.2 mm,
@@ -44,6 +49,23 @@ _CHART_PADDING_TEXELS = 4
 # How far each chart's colors spread into the gutter around it, so filtering at a seam never
 # reads the fill between charts.
 _GUTTER_TEXELS = 2 * _CHART_PADDING_TEXELS
+# The glb vertex attribute naming the solid vertex each vertex copies; `cake-bake` reads it.
+_SOLID_VERTEX_ATTRIBUTE = "_SOLID_VERTEX"
+# Hollowing finds the inside on a voxel grid this fine, in meters at cake size.
+_HOLLOW_VOXEL_M = 0.001
+# Openings up to about twice this wide, such as a shoe's collar, are bridged over when finding
+# the inside to hollow, so the hollow joins the opening instead of stopping a wall short of it.
+_HOLLOW_BRIDGE_M = 0.03
+# Texels facing at least this far down (the downward part of their normal) count as underside.
+_UNDERSIDE_MIN_DOWN = 0.3
+# An underside texel darker than this share of the upper surface's median brightness counts as
+# unlit, as a scan's floor-facing side comes out.
+_UNDERSIDE_DARK_RATIO = 0.35
+# Filled underside texels take the color above them at this share of its brightness, as a
+# surface facing the table would be.
+_UNDERSIDE_SHADE = 0.8
+# Texels facing at least this far up are the upper surface an unlit underside borrows from.
+_UPPER_MIN_UP = 0.3
 
 
 def _fetch_parts(path: Path) -> list[trimesh.Trimesh]:
@@ -111,9 +133,26 @@ def _to_trimesh(solid: manifold3d.Manifold) -> trimesh.Trimesh:
     return trimesh.Trimesh(vertices=mesh.vert_properties[:, :3], faces=mesh.tri_verts, process=False)
 
 
-def _build_solid(parts: list[trimesh.Trimesh], should_keep_largest: bool) -> manifold3d.Manifold:
-    components = [part for part in _weld(_merge(parts)).split(only_watertight=False) if len(part.faces) >= _MIN_SOLID_FACES]
-    solids = [solid for solid in map(_to_solid, components) if solid is not None]
+def _to_solid_or_drop_trim(component: trimesh.Trimesh, model_hull_volume: float, should_hull_open: bool) -> manifold3d.Manifold | None:
+    """The component as a solid, or None when it encloses no volume or is thin trim that will not close.
+    With `should_hull_open`, a piece that will not close becomes its convex hull instead, which suits
+    a nearly convex part modeled as an open shell, such as a guitar's neck."""
+    try:
+        return _to_solid(component)
+    except click.ClickException as error:
+        if should_hull_open and len(component.vertices) >= 4 and component.convex_hull.volume > 0:
+            return _build_manifold(component.convex_hull)
+        if len(component.vertices) >= 4 and component.convex_hull.volume >= _TRIM_HULL_VOLUME_RATIO * model_hull_volume:
+            raise
+        click.echo(f"dropped a trim piece of {len(component.faces)} triangles: {error.message}", err=True)
+        return None
+
+
+def _build_solid(parts: list[trimesh.Trimesh], should_keep_largest: bool, should_hull_open: bool = False) -> manifold3d.Manifold:
+    welded = _weld(_merge(parts))
+    components = [part for part in welded.split(only_watertight=False) if len(part.faces) >= _MIN_SOLID_FACES]
+    model_hull_volume = float(welded.convex_hull.volume)
+    solids = [solid for solid in (_to_solid_or_drop_trim(component, model_hull_volume, should_hull_open) for component in components) if solid is not None]
     if not solids:
         raise click.ClickException("no piece of the model encloses any volume")
     union = manifold3d.Manifold.batch_boolean(solids, manifold3d.OpType.Add)
@@ -143,6 +182,44 @@ def _decimate(solid: manifold3d.Manifold, max_triangles: int) -> manifold3d.Mani
     if decimated.status() != manifold3d.Error.NoError or decimated.is_empty() or decimated.volume() <= 0:
         raise click.ClickException(f"decimating {len(mesh.faces)} triangles to {max_triangles} broke the solid")
     return decimated
+
+
+class Hollow(NamedTuple):
+    """How to hollow a model whose real counterpart is hollow, such as a shoe, in meters at cake size."""
+
+    wall_m: float
+    """The least thickness left around the hollow."""
+    floor_m: float
+    """The height above the model's bottom the hollow stays clear of, such as a shoe's sole."""
+    voxel_m: float = _HOLLOW_VOXEL_M
+    """The grid the inside is found on; finer follows the model's shape more closely and takes longer."""
+
+
+def _hollow(solid: manifold3d.Manifold, hollow: Hollow, unit_per_m: float) -> manifold3d.Manifold:
+    """The solid with its inside cut away, leaving walls `hollow.wall_m` thick and the bottom
+    `hollow.floor_m` whole. The inside is the solid with its openings bridged over, so the hollow
+    runs out through an opening such as a shoe's collar, as the real one does."""
+    mesh = _to_trimesh(solid)
+    pitch, wall, floor, bridge = (value * unit_per_m for value in (hollow.voxel_m, hollow.wall_m, hollow.floor_m, _HOLLOW_BRIDGE_M))
+    margin = bridge + 2 * pitch
+    axes = [np.arange(low - margin, high + margin + pitch, pitch) for low, high in zip(*mesh.bounds, strict=True)]
+    zs, ys, xs = np.meshgrid(axes[2], axes[1], axes[0], indexing="ij")
+    points = np.stack([xs.ravel(), ys.ravel(), zs.ravel()], axis=1)
+    winding = igl.fast_winding_number(np.asarray(mesh.vertices, dtype=np.float64), np.asarray(mesh.faces, dtype=np.int64), points)
+    is_inside = (winding > 0.5).reshape(xs.shape)
+    is_near = ndimage.distance_transform_edt(~is_inside) * pitch <= bridge
+    is_bridged = ndimage.distance_transform_edt(is_near) * pitch > bridge
+    depth = ndimage.distance_transform_edt(is_bridged) * pitch
+    field = np.minimum(depth - wall, ys - (mesh.bounds[0, 1] + floor))
+    vertices, faces, _ = igl.marching_cubes(field.ravel(), points, len(axes[0]), len(axes[1]), len(axes[2]), 0.0)
+    if len(faces) == 0:
+        raise click.ClickException("the model has no inside deep enough to hollow")
+    cut = _build_manifold(trimesh.Trimesh(vertices, faces, process=False))
+    if cut.status() == manifold3d.Error.NoError and cut.volume() < 0:
+        cut = _build_manifold(trimesh.Trimesh(vertices, faces[:, ::-1], process=False))
+    if cut.status() != manifold3d.Error.NoError or cut.volume() <= 0:
+        raise click.ClickException(f"the hollow did not come out a closed solid: {cut.status().name}")
+    return solid - cut
 
 
 def _srgb_u8_to_linear(srgb: np.ndarray) -> np.ndarray:
@@ -308,20 +385,68 @@ def _fill_gutter(image: np.ndarray, is_covered: np.ndarray) -> np.ndarray:
     return np.round(image).astype(np.uint8)
 
 
-def _bake_texture(parts: list[trimesh.Trimesh], positions: np.ndarray, atlas: _Atlas, texture_size: int) -> Image.Image:
+def _fill_unlit_underside(colors: np.ndarray, points: np.ndarray, normals: np.ndarray) -> np.ndarray:
+    """The colors with the dark, unlit underside a scan leaves where it sat replaced by the color of
+    the upper surface straight above each texel, shaded as a side facing the table would be."""
+    luma = colors.astype(np.float64).mean(axis=1)
+    is_upper = normals[:, 1] >= _UPPER_MIN_UP
+    if not is_upper.any():
+        raise click.ClickException("the model has no upper surface to fill its underside from")
+    is_unlit = (normals[:, 1] <= -_UNDERSIDE_MIN_DOWN) & (luma < _UNDERSIDE_DARK_RATIO * np.median(luma[is_upper]))
+    _, nearest = spatial.cKDTree(points[is_upper][:, [0, 2]]).query(points[is_unlit][:, [0, 2]])
+    filled = colors.copy()
+    filled[is_unlit] = np.round(colors[is_upper][nearest] * _UNDERSIDE_SHADE).astype(np.uint8)
+    return filled
+
+
+class Recolor(NamedTuple):
+    """A change of a model's colors, which leaves grays (a white eye, a black sole) as they are."""
+
+    hue_shift_deg: float
+    """How far every color's hue turns."""
+    saturation_scale: float
+    value_scale: float
+    """What a fully saturated color's brightness is multiplied by; a gray's is kept, and a color between moves in proportion."""
+
+
+def _recolor(image: Image.Image, recolor: Recolor) -> Image.Image:
+    hsv = np.asarray(image.convert("HSV"), dtype=np.float64)
+    hue, saturation, value = hsv[..., 0], hsv[..., 1] / 255, hsv[..., 2]
+    hue = (hue + recolor.hue_shift_deg * 256 / 360) % 256
+    value = value * (1 + saturation * (recolor.value_scale - 1))
+    saturation = saturation * recolor.saturation_scale
+    recolored = np.stack([hue, np.clip(saturation * 255, 0, 255), np.clip(value, 0, 255)], axis=-1)
+    return Image.fromarray(np.round(recolored).astype(np.uint8), mode="HSV").convert("RGB")
+
+
+class Finish(NamedTuple):
+    """Changes to the baked texture."""
+
+    should_fill_unlit_underside: bool = False
+    recolor: Recolor | None = None
+
+
+def _bake_texture(parts: list[trimesh.Trimesh], positions: np.ndarray, atlas: _Atlas, texture_size: int, finish: Finish) -> Image.Image:
     """The source model's color at each texel of the atlas laid over `positions`, read from the
-    nearest point of the source surface at the source's full detail."""
+    nearest point of the source surface at the source's full detail, then finished."""
     corners = atlas.uvs[atlas.faces] * texture_size
     corners[..., 1] = texture_size - corners[..., 1]
     texel_ids, tri_ids, bary = _rasterize(corners, texture_size)
-    points = np.einsum("ni,nij->nj", bary, positions[atlas.faces[tri_ids]])
-    texel_len = math.sqrt(float(trimesh.triangles.area(positions[atlas.faces]).sum()) / len(texel_ids))
+    triangles = positions[atlas.faces]
+    points = np.einsum("ni,nij->nj", bary, triangles[tri_ids])
+    texel_len = math.sqrt(float(trimesh.triangles.area(triangles).sum()) / len(texel_ids))
+    colors = _sample_colors(parts, points, texel_len)
+    if finish.should_fill_unlit_underside:
+        normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+        normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-30)
+        colors = _fill_unlit_underside(colors, points, normals[tri_ids])
     flat_image = np.zeros((texture_size * texture_size, 3), dtype=np.uint8)
-    flat_image[texel_ids] = _sample_colors(parts, points, texel_len)
+    flat_image[texel_ids] = colors
     is_covered = np.zeros(texture_size * texture_size, dtype=bool)
     is_covered[texel_ids] = True
     shape = (texture_size, texture_size)
-    return Image.fromarray(_fill_gutter(flat_image.reshape(*shape, 3), is_covered.reshape(shape)))
+    image = Image.fromarray(_fill_gutter(flat_image.reshape(*shape, 3), is_covered.reshape(shape)))
+    return image if finish.recolor is None else _recolor(image, finish.recolor)
 
 
 def _place_on_stand(mesh: trimesh.Trimesh, size_m: float) -> np.ndarray:
@@ -348,16 +473,30 @@ def repair_model(
     should_keep_largest: bool,
     max_triangles: int = _DEFAULT_MAX_TRIANGLES,
     texture_size: int = _DEFAULT_TEXTURE_SIZE,
+    hollow: Hollow | None = None,
+    finish: Finish = Finish(),
+    should_hull_open: bool = False,
+    turn: tuple[str, float] | None = None,
 ) -> Repaired:
     """Writes `destination` as a closed, outward-wound, single-piece textured glb of at most about `max_triangles` triangles."""
     parts = _fetch_parts(source)
-    solid = _to_trimesh(_decimate(_build_solid(parts, should_keep_largest), max_triangles))
+    if turn is not None:
+        axis, degrees = turn
+        rotation = trimesh.transformations.rotation_matrix(math.radians(degrees), np.eye(3)["xyz".index(axis)])
+        parts = [part.copy().apply_transform(rotation) for part in parts]
+    solid = _build_solid(parts, should_keep_largest, should_hull_open)
+    if hollow is not None:
+        solid = _hollow(solid, hollow, float(_to_trimesh(solid).extents.max()) / size_m)
+    solid = _to_trimesh(_decimate(solid, max_triangles))
     atlas = _build_atlas(solid, texture_size)
     positions = np.asarray(solid.vertices)[atlas.source_vertex_ids]
-    texture = _bake_texture(parts, positions, atlas, texture_size)
+    texture = _bake_texture(parts, positions, atlas, texture_size, finish)
     material = trimesh.visual.material.PBRMaterial(baseColorTexture=texture, metallicFactor=0.0)
     visual = trimesh.visual.TextureVisuals(uv=atlas.uvs, material=material)
-    textured = trimesh.Trimesh(positions, atlas.faces, visual=visual, process=False)
+    # The solid vertex each glb vertex copies, so the bake rejoins the seams without matching positions,
+    # which two sheets of a hollowed wall can share.
+    solid_ids = {_SOLID_VERTEX_ATTRIBUTE: atlas.source_vertex_ids.astype(np.uint32)}
+    textured = trimesh.Trimesh(positions, atlas.faces, visual=visual, vertex_attributes=solid_ids, process=False)
     placement = _place_on_stand(solid, size_m)
     repaired = Repaired(solid.apply_transform(placement), textured.apply_transform(placement))
     if not (repaired.solid.is_watertight and repaired.solid.is_winding_consistent and repaired.solid.volume > 0):
@@ -374,8 +513,27 @@ def repair_model(
 @click.option("--keep-largest", is_flag=True, help="Keep only the biggest piece when several remain, such as one of a pair.")
 @click.option("--max-triangles", default=_DEFAULT_MAX_TRIANGLES, show_default=True, help="Decimate a model with more triangles down to this.")
 @click.option("--texture-size", default=_DEFAULT_TEXTURE_SIZE, show_default=True, help="Side of the baked square texture, in texels.")
-def main(source: Path, destination: Path, size_m: float, keep_largest: bool, max_triangles: int, texture_size: int) -> None:
-    solid = repair_model(source, destination, size_m, keep_largest, max_triangles, texture_size).solid
+@click.option("--hollow", type=(float, float), default=None, metavar="WALL_M FLOOR_M", help="Hollow the inside, leaving walls WALL_M thick and the bottom FLOOR_M high whole, for a model whose counterpart is hollow, such as a shoe.")
+@click.option("--turn", type=(click.Choice(["x", "y", "z"]), float), default=None, metavar="AXIS DEGREES", help="Turn the model about an axis first, to rest it on another side, such as a skinned model trimesh loads in its node pose.")
+@click.option("--hull-open-pieces", is_flag=True, help="Replace each piece that will not close with its convex hull, for nearly convex parts modeled as open shells.")
+@click.option("--fill-unlit-underside", is_flag=True, help="Replace a scan's dark, unlit underside with the colors of the surface above it.")
+@click.option("--recolor", type=(float, float, float), default=None, metavar="HUE_DEG SATURATION VALUE", help="Recolor the model: turn every hue by HUE_DEG and scale saturated colors' saturation and brightness, leaving grays as they are.")
+def main(
+    source: Path,
+    destination: Path,
+    size_m: float,
+    keep_largest: bool,
+    max_triangles: int,
+    texture_size: int,
+    hollow: tuple[float, float] | None,
+    turn: tuple[str, float] | None,
+    hull_open_pieces: bool,
+    fill_unlit_underside: bool,
+    recolor: tuple[float, float, float] | None,
+) -> None:
+    finish = Finish(fill_unlit_underside, None if recolor is None else Recolor(*recolor))
+    hollowing = None if hollow is None else Hollow(*hollow)
+    solid = repair_model(source, destination, size_m, keep_largest, max_triangles, texture_size, hollowing, finish, hull_open_pieces, turn).solid
     extents = np.round(solid.extents, 3).tolist()
     click.echo(f"{destination}: {len(solid.faces)} triangles, extents {extents} m, volume {solid.volume:.6f} m3")
 

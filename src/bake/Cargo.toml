@@ -6,5 +6,5 @@ license.workspace = true
 
 [dependencies]
 cake-core = { path = "../core" }
-gltf = { version = "1.4.1", default-features = false, features = ["utils", "allow_empty_texture"] }
+gltf = { version = "1.4.1", default-features = false, features = ["utils", "allow_empty_texture", "extras"] }
 rapier3d = { version = "=0.36.1", default-features = false, features = ["dim3", "f32", "std"] }

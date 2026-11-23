@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import click
+import manifold3d
 import numpy as np
 import pytest
 import trimesh
@@ -22,6 +23,8 @@ _spec.loader.exec_module(_repair_module)
 
 # A small texture keeps the tests quick; the bake works the same at any size.
 _TEST_TEXTURE_SIZE = 128
+# A coarse grid keeps hollowing quick, and the 0.2 m test models need no finer.
+_HOLLOW = _repair_module.Hollow(wall_m=0.02, floor_m=0.05, voxel_m=0.004)
 
 
 def _write_box(path: Path, extents: tuple[float, float, float], center: tuple[float, float, float]) -> Path:
@@ -42,7 +45,7 @@ def _box(extents: tuple[float, float, float], center: tuple[float, float, float]
     return box
 
 
-def _repair(source: Path, destination: Path, should_keep_largest: bool = False, **options: int):
+def _repair(source: Path, destination: Path, should_keep_largest: bool = False, **options: object):
     return _repair_module.repair_model(source, destination, 0.2, should_keep_largest, **{"texture_size": _TEST_TEXTURE_SIZE, **options})
 
 
@@ -88,14 +91,59 @@ def test_a_model_over_the_triangle_budget_is_decimated_to_one_closed_solid_of_ne
     assert solid.volume == pytest.approx(4 / 3 * np.pi * 0.1**3, rel=0.02)
 
 
-def test_the_glb_holds_the_solid_split_only_along_texture_seams(tmp_path: Path) -> None:
+def test_the_glb_names_the_solid_vertex_each_seam_split_vertex_copies(tmp_path: Path) -> None:
     source = _write_scene(tmp_path / "sphere.glb", [trimesh.creation.icosphere(subdivisions=3)])
     repaired = _repair(source, tmp_path / "out.glb")
     loaded = trimesh.load(tmp_path / "out.glb", force="mesh", process=False)
     assert isinstance(loaded.visual, trimesh.visual.TextureVisuals)
-    welded = trimesh.Trimesh(loaded.vertices, loaded.faces, process=True)
-    assert welded.is_watertight
-    assert welded.volume == pytest.approx(repaired.solid.volume, rel=1e-4)
+    solid_ids = np.asarray(loaded.vertex_attributes["_SOLID_VERTEX"]).ravel().astype(int)
+    assert len(loaded.vertices) > len(repaired.solid.vertices), "the seams split some vertices"
+    rejoined = trimesh.Trimesh(repaired.solid.vertices, solid_ids[loaded.faces], process=False)
+    assert rejoined.is_watertight
+    assert np.allclose(loaded.vertices, repaired.solid.vertices[solid_ids], atol=1e-6)
+
+
+def test_hollowing_leaves_walls_and_a_floor_of_the_asked_thickness(tmp_path: Path) -> None:
+    source = _write_box(tmp_path / "box.glb", (1.0, 1.0, 1.0), (0.0, 0.0, 0.0))
+    solid = _repair(source, tmp_path / "out.glb", hollow=_HOLLOW).solid
+    assert solid.is_watertight
+    hollow_volume = 0.16 * 0.16 * (0.2 - 0.05 - 0.02)
+    assert solid.volume == pytest.approx(0.2**3 - hollow_volume, rel=0.05)
+
+
+def test_hollowing_opens_into_a_narrow_opening_instead_of_walling_it_off(tmp_path: Path) -> None:
+    block = manifold3d.Manifold.cube((1.0, 1.0, 1.0), center=True) - manifold3d.Manifold.cube((0.3, 0.6, 0.3), center=True).translate((0.0, 0.4, 0.0))
+    mesh = block.to_mesh()
+    source = _write_scene(tmp_path / "well.glb", [trimesh.Trimesh(mesh.vert_properties[:, :3], mesh.tri_verts)])
+    solid = _repair(source, tmp_path / "out.glb", hollow=_HOLLOW).solid
+    assert len(solid.split(only_watertight=False)) == 1, "an inner surface apart from the outer one would be a sealed void"
+    assert solid.volume < 0.6 * 0.2**3
+
+
+def _box_colored_by_facing(down_color: list[int], other_color: list[int]) -> trimesh.Trimesh:
+    box = _box((1.0, 1.0, 1.0), (0.0, 0.0, 0.0)).subdivide().subdivide()
+    box = trimesh.Trimesh(box.vertices[box.faces].reshape(-1, 3), np.arange(len(box.faces) * 3).reshape(-1, 3), process=False)
+    is_down = np.repeat(box.face_normals[:, 1] < -0.5, 3)
+    box.visual.vertex_colors = np.where(is_down[:, None], down_color + [255], other_color + [255]).astype(np.uint8)
+    return box
+
+
+def test_an_unlit_underside_takes_the_shaded_color_of_the_surface_above(tmp_path: Path) -> None:
+    source = _write_scene(tmp_path / "unlit.glb", [_box_colored_by_facing([10, 10, 10], [200, 150, 100])])
+    finish = _repair_module.Finish(should_fill_unlit_underside=True)
+    repaired = _repair(source, tmp_path / "out.glb", finish=finish)
+    bottom = _sample_baked(repaired, np.array([[0.0, 0.0, 0.0], [0.05, 0.0, -0.05]]))
+    assert np.abs(bottom - [160, 120, 80]).max() <= 3
+
+
+def test_recoloring_turns_saturated_colors_and_leaves_grays(tmp_path: Path) -> None:
+    box = _box((2.0, 1.0, 1.0), (0.0, 0.0, 0.0)).subdivide().subdivide()
+    box.visual.vertex_colors = np.where(box.vertices[:, [0]] > 0, [255, 0, 0, 255], [255, 255, 255, 255]).astype(np.uint8)
+    finish = _repair_module.Finish(recolor=_repair_module.Recolor(hue_shift_deg=120, saturation_scale=1.0, value_scale=0.5))
+    repaired = _repair(_write_scene(tmp_path / "halves.glb", [box]), tmp_path / "out.glb", finish=finish)
+    red_side, white_side = _sample_baked(repaired, np.array([[0.08, 0.05, 0.0], [-0.08, 0.05, 0.0]]))
+    assert np.abs(red_side - [0, 128, 0]).max() <= 4
+    assert np.abs(white_side - [255, 255, 255]).max() <= 2
 
 
 def _texture_of(repaired) -> np.ndarray:
