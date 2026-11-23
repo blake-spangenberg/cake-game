@@ -1,6 +1,6 @@
 //! The browser's handle on the core simulation.
 
-use cake_core::cakes::build_slice_missing_cake;
+use cake_core::cakes::CakeModel;
 use cake_core::input::Input;
 use cake_core::knife::{
     BLADE_ARC_RADIUS_M, BLADE_BACK_M, BLADE_HALF_SPAN_M, BLADE_THICKNESS_M, HANDLE_LEN_M, HANDLE_RADIUS_M,
@@ -94,10 +94,12 @@ pub fn replay_script() -> Vec<u64> {
 
 #[wasm_bindgen]
 impl Game {
-    /// A round that cuts itself at `round_ticks`, or never when it is undefined.
+    /// A round on the baked cake in `cake_file` that cuts itself at `round_ticks`, or never when
+    /// it is undefined.
     #[wasm_bindgen(constructor)]
-    pub fn new(round_ticks: Option<u32>) -> Game {
-        Game { world: World::create(build_slice_missing_cake(), START_KNIFE, round_ticks) }
+    pub fn new(round_ticks: Option<u32>, cake_file: &[u8]) -> Result<Game, JsError> {
+        let model = CakeModel::decode(cake_file).map_err(|error| JsError::new(&format!("cake file: {error:?}")))?;
+        Ok(Game { world: World::create(model, START_KNIFE, round_ticks) })
     }
 
     /// Advances one tick with an input in the core's wire format.
@@ -168,6 +170,11 @@ impl Game {
     /// The cake mesh's local vertex positions, flattened.
     pub fn get_cake_mesh_positions(&self) -> Vec<f32> {
         self.world.get_model().mesh.positions.iter().flat_map(|p| p.to_array()).collect()
+    }
+
+    /// The cake mesh's sRGB vertex colors, flattened.
+    pub fn get_cake_mesh_colors(&self) -> Vec<u8> {
+        self.world.get_model().colors.iter().flatten().copied().collect()
     }
 
     /// The cake mesh's triangles as vertex indices, flattened.

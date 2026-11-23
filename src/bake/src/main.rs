@@ -17,6 +17,11 @@ const VHACD_RESOLUTION: u32 = 64;
 /// How concave a part may stay, as a share of the model's size, before it is split.
 const VHACD_CONCAVITY: f32 = 0.01;
 const MAX_HULLS: u32 = 16;
+/// A hull with more vertices than this many times [`MAX_HULL_VERTICES`] sheds vertices in
+/// batches, since pricing every vertex's removal one drop at a time costs time cubic in the count.
+const COARSE_STAGE_FACTOR: usize = 4;
+/// A batch of the coarse stage sheds one in this many of a hull's vertices.
+const COARSE_BATCH_SHARE: usize = 4;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -38,17 +43,18 @@ fn main() -> ExitCode {
 
 fn bake(source: &str, destination: &str) -> Result<String, String> {
     let bytes = fs::read(source).map_err(|error| format!("cannot read the model: {error}"))?;
-    let mesh = fetch_mesh(&bytes)?;
+    let (mesh, colors) = fetch_mesh(&bytes)?;
     let hulls = build_hulls(&mesh)?;
-    let model = CakeModel { mesh, hulls };
+    let model = CakeModel { mesh, colors, hulls };
     model.validate().map_err(|error| format!("not a playable cake: {error:?}"))?;
     fs::write(destination, model.encode()).map_err(|error| format!("cannot write {destination}: {error}"))?;
     let hull_sizes: Vec<usize> = model.hulls.iter().map(Vec::len).collect();
     Ok(format!("{} triangles, {} hulls with {hull_sizes:?} vertices", model.mesh.triangles.len(), model.hulls.len()))
 }
 
-/// The one triangle mesh of a repaired glb, in meters with the node transform ignored.
-fn fetch_mesh(bytes: &[u8]) -> Result<Mesh, String> {
+/// The one triangle mesh of a repaired glb and its vertex colors, in meters with the node
+/// transform ignored.
+fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Vec<[u8; 3]>), String> {
     let glb = gltf::Gltf::from_slice(bytes).map_err(|error| format!("not a glb: {error}"))?;
     let blob = glb.blob.as_deref();
     let mut meshes = glb.meshes();
@@ -66,10 +72,13 @@ fn fetch_mesh(bytes: &[u8]) -> Result<Mesh, String> {
     if !indices.len().is_multiple_of(3) {
         return Err("the index count is not a multiple of 3".into());
     }
-    Ok(Mesh {
-        positions: positions.map(Vec3::from_array).collect(),
-        triangles: indices.chunks_exact(3).map(|triangle| [triangle[0], triangle[1], triangle[2]]).collect(),
-    })
+    let positions: Vec<Vec3> = positions.map(Vec3::from_array).collect();
+    let colors: Vec<[u8; 3]> = reader.read_colors(0).ok_or("the mesh has no vertex colors")?.into_rgb_u8().collect();
+    if colors.len() != positions.len() {
+        return Err("the mesh does not have one color per vertex".into());
+    }
+    let triangles = indices.chunks_exact(3).map(|triangle| [triangle[0], triangle[1], triangle[2]]).collect();
+    Ok((Mesh { positions, triangles }, colors))
 }
 
 /// The collider: the mesh's approximate convex decomposition, each hull cut down to few vertices.
@@ -98,15 +107,19 @@ fn simplify_hull(points: &[Vec3]) -> Option<Vec<Vec3>> {
         return None;
     }
     while vertices.len() > MAX_HULL_VERTICES {
-        let (best_idx, _) = (0..vertices.len())
+        let is_coarse = vertices.len() > COARSE_STAGE_FACTOR * MAX_HULL_VERTICES;
+        let drop_len = if is_coarse { vertices.len() / COARSE_BATCH_SHARE } else { 1 };
+        let mut costs: Vec<(usize, f32)> = (0..vertices.len())
             .map(|idx| {
                 let mut rest = vertices.clone();
                 rest.swap_remove(idx);
                 (idx, calc_hull_volume(&rest).unwrap_or(0.0))
             })
-            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+            .collect();
+        costs.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let dropped: Vec<usize> = costs.iter().take(drop_len).map(|&(idx, _)| idx).collect();
         let rest: Vec<Vec3> =
-            vertices.iter().enumerate().filter(|(idx, _)| *idx != best_idx).map(|(_, &v)| v).collect();
+            vertices.iter().enumerate().filter(|(idx, _)| !dropped.contains(idx)).map(|(_, &v)| v).collect();
         vertices = convex_hull(&rest).0;
     }
     Some(vertices)
@@ -135,13 +148,30 @@ mod tests {
 
     #[test]
     fn l_shaped_model_bakes_into_a_playable_cake_with_a_hull_per_arm() {
-        let mesh = fetch_mesh(L_SHAPE_GLB).unwrap();
+        let (mesh, colors) = fetch_mesh(L_SHAPE_GLB).unwrap();
         let hulls = build_hulls(&mesh).unwrap();
-        let model = CakeModel { mesh, hulls };
+        let model = CakeModel { mesh, colors, hulls };
         assert_eq!(model.validate(), Ok(()));
         assert!(model.hulls.len() >= 2, "an L is concave, so one hull would fill its corner");
         assert!(model.hulls.iter().all(|hull| hull.len() <= MAX_HULL_VERTICES));
         assert_eq!(CakeModel::decode(&model.encode()), Ok(model));
+    }
+
+    #[test]
+    fn dense_hull_is_cut_to_the_vertex_limit_keeping_most_of_its_volume() {
+        let point_len = 8 * MAX_HULL_VERTICES;
+        let golden_angle = core::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
+        let sphere: Vec<Vec3> = (0..point_len)
+            .map(|idx| {
+                let y = 1.0 - 2.0 * (idx as f32 + 0.5) / point_len as f32;
+                let ring_radius = (1.0 - y * y).sqrt();
+                let angle = golden_angle * idx as f32;
+                Vec3::new(ring_radius * angle.cos(), y, ring_radius * angle.sin())
+            })
+            .collect();
+        let simplified = simplify_hull(&sphere).unwrap();
+        assert!(simplified.len() <= MAX_HULL_VERTICES);
+        assert!(calc_hull_volume(&simplified).unwrap() > 0.8 * calc_hull_volume(&sphere).unwrap());
     }
 
     #[test]

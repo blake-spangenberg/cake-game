@@ -4,7 +4,6 @@ import { Spring } from "./spring";
 
 export type PickKind = "cake" | "knife" | "stand";
 
-const FROSTING = 0xf3e3ec;
 const SPONGE = 0xe8c07a;
 const TABLE_THICKNESS_M = 0.04;
 const LEG_SIDE_M = 0.06;
@@ -65,7 +64,7 @@ export class Scene {
     for (const half of this.halves) this.scene.remove(half.group, half.cap);
     this.halves = [];
     this.cake.clear();
-    const mesh = new THREE.Mesh(buildCakeGeometry(game), new THREE.MeshStandardMaterial({ color: FROSTING }));
+    const mesh = new THREE.Mesh(buildCakeGeometry(game), new THREE.MeshStandardMaterial({ vertexColors: true }));
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     this.cake.add(mesh);
@@ -120,7 +119,7 @@ export class Scene {
         mesh.quaternion.copy(this.cake.quaternion);
         group.add(mesh);
       };
-      const frosting = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: FROSTING, clippingPlanes: [clip], clipShadows: true }));
+      const frosting = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ vertexColors: true, clippingPlanes: [clip], clipShadows: true }));
       frosting.castShadow = true;
       placeLikeCake(frosting);
       for (const [faces, stencilOp] of [
@@ -287,10 +286,22 @@ function buildCapMaterial(): THREE.Material {
   });
 }
 
+/** The vertex colors as the renderer's linear floats, from the cake file's sRGB bytes. */
+function calcLinearColors(srgbBytes: Uint8Array): Float32Array {
+  const color = new THREE.Color();
+  const linear = new Float32Array(srgbBytes.length);
+  for (let i = 0; i < srgbBytes.length; i += 3) {
+    color.setRGB(srgbBytes[i] / 255, srgbBytes[i + 1] / 255, srgbBytes[i + 2] / 255, THREE.SRGBColorSpace);
+    linear.set([color.r, color.g, color.b], i);
+  }
+  return linear;
+}
+
 function buildCakeGeometry(game: Game): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(game.get_cake_mesh_positions(), 3));
   geometry.setIndex(new THREE.BufferAttribute(game.get_cake_mesh_triangles(), 1));
+  geometry.setAttribute("color", new THREE.BufferAttribute(calcLinearColors(game.get_cake_mesh_colors()), 3));
   const faceted = geometry.toNonIndexed();
   faceted.computeVertexNormals();
   return faceted;

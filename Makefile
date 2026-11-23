@@ -1,4 +1,4 @@
-.PHONY: install run test format clean wasm
+.PHONY: install run test format clean wasm cakes
 .DEFAULT_GOAL := run
 
 ifeq ($(OS),Windows_NT)
@@ -27,7 +27,7 @@ WASM_MODULE := build/target/wasm32-unknown-unknown/release/cake_wasm.wasm
 install: build/.gitignore
 	bash tools/install.sh
 
-run: wasm
+run: wasm cakes
 	cd src/client && npm run dev
 
 test: wasm
@@ -35,6 +35,7 @@ test: wasm
 	cargo clippy --all-targets -- -D warnings
 	cargo test
 	cd src/client && npm run check
+	node tools/check-cakes.mjs
 	uv run --locked --script tools/test-repair-model.py
 	cargo run -q --release -p cake-core --example replay > build/replay-native.txt
 	node tools/replay-wasm.mjs > build/replay-wasm.txt
@@ -49,6 +50,9 @@ clean:
 wasm: build/.gitignore
 	cargo build --release --target wasm32-unknown-unknown -p cake-wasm
 	$(WASM_BINDGEN) --target web --out-dir build/wasm $(WASM_MODULE)
+
+cakes: build/.gitignore
+	node tools/cake-pack.mjs sync assets/cakes build/public/cakes
 
 build/.gitignore:
 	mkdir -p build

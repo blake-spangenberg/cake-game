@@ -66,13 +66,16 @@ The reveal is dramatic, with pomp and circumstance, and is worth a round running
 
 ## Cakes
 - Every round uses one of several cakes.
-- Cakes are sourced 3D models rather than generated ones, since they are the star of the show and a generated asset dulls the impression. Models must be free (CC0 or CC-BY), with credits shown in game. The owner picks each model from a shortlist.
+- Cakes are sourced 3D models rather than generated ones, since they are the star of the show and a generated asset dulls the impression. Models must be free (CC0 or CC-BY), with credits shown in game. The owner picks each model from a shortlist, and decides the set's size at pick time.
+- The set shares one look: smooth stylized, mid-poly models, never low-poly or flat-shaded. If too few stylized models qualify, the whole set switches to photoreal scans rather than mixing the two, so a shortlist carries scan backups for the owner to pivot to.
+- Every cake is a whole object. Nothing already sliced, bitten, or cut, real cakes included: the first cut the player sees is their own.
+- A model keeps its real counterpart's asymmetry: one left or right shoe, never a mirrored one.
+- Sessions may recolor a model, keep one item of a pair, and trim a thin part a cake could not hold. Any reshaping (bending, adding a knot) needs the owner's approval.
 - Cakes are not limited to traditional looking ones, which are mostly symmetric. Steer away from simple geometric shapes and symmetric designs. Asymmetry comes from:
     - cakes that are asymmetric as sourced
-    - damage to a sourced cake: a missing slice, a bite, a collapsed tier
     - models that were never meant to be cakes (e.g. a rubber duck with a scarf), whose cake nature shows only when the cut exposes the layers inside
         - Any object works (a rubber duck, an eggplant, a car) as long as a cake decorating expert could plausibly bake and carve a cake in that shape. Reject shapes with thin or floating parts a real cake could not hold
-        - Cakes must be asymmetric enough that centering the cake and zeroing the knife is not the whole game: a round cake or any centrally symmetric shape is too easy. Prefer lopsided, irregular shapes, and favor the owner's ideas: one sneaker, an L-shaped sectional couch, a potato or eggplant, an oven mitt, a chicken nugget or tender, a wooden log, a lucky cat (maneki-neko), a yellow rain boot
+        - Cakes must be asymmetric enough that centering the cake and zeroing the knife is not the whole game: a round cake or any centrally symmetric shape is too easy. A mirror-symmetric shape (a car, a plain duck) is too easy as well, since cutting along its mirror plane halves it exactly, unless no pose it can rest in brings that plane within the knife's tilt limit. Prefer lopsided, irregular shapes, and favor the owner's ideas: one sneaker, an L-shaped sectional couch, a potato or eggplant, an oven mitt, a chicken nugget or tender, a wooden log, a lucky cat (maneki-neko), a yellow rain boot
 - Cut faces show the cake inside, as sponge layers separated by frosting, since the secret-cake reveal depends on it.
 - Every cake fits within the cutting region, and the blade spans the whole region at every tilt and heading, so no cake limits which cuts can reach it. Mind the knife-to-cake size ratio across the whole set.
 

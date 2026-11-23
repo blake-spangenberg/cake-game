@@ -41,7 +41,7 @@ fn placeholder_cake_is_closed() {
 fn build_box_cake(half_x_m: f32, height_m: f32, half_z_m: f32) -> CakeModel {
     let mesh = build_box([-half_x_m, 0.0, -half_z_m], [half_x_m, height_m, half_z_m]);
     let hull = mesh.positions.clone();
-    CakeModel { mesh, hulls: vec![hull] }
+    CakeModel::build_plain(mesh, vec![hull])
 }
 
 #[test]
@@ -64,6 +64,15 @@ fn cake_file_rejects_damaged_bytes() {
     let mut wrong_version = bytes.clone();
     wrong_version[4] ^= 1;
     assert_eq!(CakeModel::decode(&wrong_version), Err(CakeError::BadFile));
+}
+
+#[test]
+fn cake_file_keeps_its_vertex_colors_and_needs_one_per_vertex() {
+    let mut model = build_box_cake(0.05, 0.05, 0.05);
+    model.colors[3] = [1, 2, 3];
+    assert_eq!(CakeModel::decode(&model.encode()), Ok(model.clone()));
+    model.colors.pop();
+    assert_eq!(model.validate(), Err(CakeError::BadColors));
 }
 
 #[test]

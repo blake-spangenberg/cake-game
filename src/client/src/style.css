@@ -74,3 +74,28 @@ body {
   font-weight: bold;
   font-variant-numeric: tabular-nums;
 }
+
+#cake-menu {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  color: #f4ead8;
+  font-size: 13px;
+}
+
+#cake-picker {
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: #f4ead8;
+  font-size: 15px;
+}
+
+#credit {
+  margin-top: 6px;
+  opacity: 0.8;
+}
+
+#credit a {
+  color: inherit;
+}
