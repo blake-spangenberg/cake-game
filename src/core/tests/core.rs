@@ -343,20 +343,34 @@ fn spawned_cake_is_beside_the_stand_out_of_the_cut() {
     assert!(!world.is_cut_through());
 }
 
-/// A box cake settled on the table where it spawns, shifted along the knife's edge by `shift_z_m`,
-/// with the knife tilted so its plane meets the table through the cake.
-fn settle_box_on_the_table_in_the_knife_plane(shift_z_m: f32) -> World {
-    let mut model = build_box_cake(0.15, 0.1, 0.05);
+/// `model` moved by `shift` from where it spawns and settled on the table there, with the knife
+/// held at `tilt_rad`.
+fn settle_shifted_cake(mut model: CakeModel, shift: Vec3, tilt_rad: f64) -> World {
     for p in model.mesh.positions.iter_mut().chain(model.hulls.iter_mut().flatten()) {
-        p.z += shift_z_m;
+        *p += shift;
     }
-    let tilt_rad = -core::f64::consts::FRAC_PI_4;
     let mut world = World::create(model, tilt_rad, None);
     let input = Input { knife: KnifeInput { tilt: quantize_radians(tilt_rad), lower: 0 }, ..Input::default() };
     for _ in 0..60 {
         world.step(&input);
     }
     world
+}
+
+/// A box cake settled on the table where it spawns, shifted along the knife's edge by `shift_z_m`,
+/// with the knife tilted so its plane meets the table through the cake.
+fn settle_box_on_the_table_in_the_knife_plane(shift_z_m: f32) -> World {
+    settle_shifted_cake(build_box_cake(0.15, 0.1, 0.05), Vec3::new(0.0, 0.0, shift_z_m), -core::f64::consts::FRAC_PI_4)
+}
+
+#[test]
+fn cake_on_the_table_under_the_stands_rim_is_not_cut_since_the_blade_stops_on_the_plate() {
+    let mut world = settle_shifted_cake(build_box_cake(0.05, 0.1, 0.05), Vec3::new(-0.3, 0.0, 0.0), -0.6);
+    let plane = world.get_knife().calc_plane();
+    let crossed = calc_split(world.get_cake_positions(), &world.get_model().mesh.triangles, &plane);
+    assert!(crossed.above_m3 > 0.0 && crossed.below_m3 > 0.0, "{crossed:?}");
+    assert!(!world.is_cut_through());
+    assert_eq!(world.cut().calc_score(), 0.0);
 }
 
 #[test]
@@ -373,7 +387,10 @@ fn cake_beyond_the_blade_end_is_not_cut_though_the_plane_crosses_it() {
     let crossed = calc_split(world.get_cake_positions(), &world.get_model().mesh.triangles, &plane);
     assert!(crossed.above_m3 > 0.0 && crossed.below_m3 > 0.0, "{crossed:?}");
     assert!(!world.is_cut_through());
-    assert_eq!(world.cut().calc_score(), 0.0);
+    let missed = world.cut();
+    assert_eq!(missed.calc_score(), 0.0);
+    assert_eq!(missed.below_m3, 0.0);
+    assert!((missed.above_m3 - 0.003).abs() < 1e-9, "{missed:?}");
 }
 
 #[test]
@@ -535,6 +552,7 @@ fn knife_rests_just_above_the_cake_standing_on_its_longest_extent() {
     let log_pivot_y_m = pivot_y_m(build_box_cake(0.1, 0.04, 0.02));
     assert!(log_pivot_y_m > cube_pivot_y_m, "{log_pivot_y_m} vs {cube_pivot_y_m}");
     assert!(pivot_y_m(build_slice_missing_cake()) <= MAX_PIVOT.y);
+    assert_eq!(pivot_y_m(build_box_cake(0.12, 0.24, 0.12)), MAX_PIVOT.y);
 }
 
 /// Grabs the placeholder's bottom tier at its rim away from the stand, which hangs it on its

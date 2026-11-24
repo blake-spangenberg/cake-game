@@ -35,9 +35,8 @@ const SWEEP_MARGIN_RAD: f64 = 0.005;
 /// settling under a resting knife does not block every turn.
 const TOUCH_TOLERANCE_M: f64 = 0.0005;
 /// How far above the player's lowering a tilt may lift the edge to ride over a bump, such as a
-/// mitten's knit, rather than stick on it. A higher step stops the tilt. The client lets the
-/// player press the knife a few millimeters past where it rests, so the highest bump ridden is
-/// this less those millimeters.
+/// mitten's knit. The client lets the player press a few millimeters past where the knife stops,
+/// and those come off the highest bump ridden.
 pub const MAX_RIDE_M: f64 = 0.015;
 /// How far past the cut's stop a cake may reach and still lie in its path, so a cake settled a
 /// hair into the plate it rests on is still cut.
@@ -119,15 +118,25 @@ impl Knife {
         self.calc_lower_limit_m(solids) >= self.lower_m - TOUCH_TOLERANCE_M
     }
 
-    /// Whether `point`, on the knife's plane, lies in the cut's path: within the blade's span and
-    /// no deeper than `stop_lower_m`, the lowering where the cut stops. The cut rocks the curved
-    /// edge along its stop, so it reaches that depth across the span, not only at the edge's
-    /// middle.
-    pub(crate) fn is_in_cut_path(&self, point: DVec3, stop_lower_m: f64) -> bool {
+    /// Whether a cut that stops at the lowering `stop_lower_m` divides `cake`: the plane crosses
+    /// it, and its whole section lies within the blade's span and no deeper than the stop. The
+    /// cut rocks the curved edge along its stop, so it reaches that depth across the span, not
+    /// only at the edge's middle.
+    pub(crate) fn is_cut_through(&self, cake: Solid, stop_lower_m: f64) -> bool {
         let frame = self.calc_frame();
-        let along_m = (point - self.pivot).dot(frame.edge);
-        let depth_m = (point - self.pivot).dot(frame.down);
-        along_m.abs() <= BLADE_HALF_SPAN_M && depth_m <= stop_lower_m + CUT_DEPTH_TOLERANCE_M
+        let is_in_path = |point: DVec3| {
+            let along_m = (point - self.pivot).dot(frame.edge);
+            let depth_m = (point - self.pivot).dot(frame.down);
+            along_m.abs() <= BLADE_HALF_SPAN_M && depth_m <= stop_lower_m + CUT_DEPTH_TOLERANCE_M
+        };
+        let plane = Plane { point: self.pivot, normal: frame.normal };
+        let mut is_crossed = false;
+        let mut is_reached = true;
+        for_each_section_segment(cake.positions, cake.triangles, &plane, |a, b| {
+            is_crossed = true;
+            is_reached &= is_in_path(a) && is_in_path(b);
+        });
+        is_crossed && is_reached
     }
 
     /// How far the edge can lower before it touches one of `solids` or the table.
@@ -148,18 +157,21 @@ impl Knife {
 }
 
 /// How far a turn from `from_rad` toward `to_rad` gets while `is_clear` holds, stopping
-/// [`SWEEP_MARGIN_RAD`] short of where it first fails but never turning back. Sweeps in small
-/// steps and refines the first step that fails.
+/// [`SWEEP_MARGIN_RAD`] short of where it first fails but never turning back.
 pub(crate) fn calc_sweep_reach(from_rad: f64, to_rad: f64, is_clear: impl Fn(f64) -> bool) -> f64 {
-    let probe_to_rad = to_rad + SWEEP_MARGIN_RAD * (to_rad - from_rad).signum();
-    let step_len = libm::ceil((probe_to_rad - from_rad).abs() / SWEEP_PROBE_RAD).max(1.0) as u32;
+    if to_rad == from_rad {
+        return to_rad;
+    }
+    let direction = (to_rad - from_rad).signum();
+    let probe_to_rad = to_rad + SWEEP_MARGIN_RAD * direction;
+    let step_len = libm::ceil((probe_to_rad - from_rad).abs() / SWEEP_PROBE_RAD) as u32;
     let mut clear_rad = from_rad;
     for i in 1..=step_len {
         let probe_rad = from_rad + (probe_to_rad - from_rad) * i as f64 / step_len as f64;
         if !is_clear(probe_rad) {
             let blocked_rad = calc_bisected_reach(clear_rad, probe_rad, is_clear);
             let reach_rad = ((blocked_rad - from_rad).abs() - SWEEP_MARGIN_RAD).max(0.0);
-            return from_rad + reach_rad * (to_rad - from_rad).signum();
+            return from_rad + reach_rad * direction;
         }
         clear_rad = probe_rad;
     }

@@ -5,7 +5,7 @@ use rapier3d::glamx::DVec3;
 use rapier3d::prelude::*;
 
 use crate::cakes::CakeModel;
-use crate::cut::{Split, calc_split, for_each_section_segment};
+use crate::cut::{Split, calc_split};
 use crate::input::{Input, KnifeInput, calc_radians};
 use crate::knife::{Knife, Solid, calc_sweep_reach};
 use crate::table::{CAKE_SPAWN, RESPAWN_BELOW_Y_M, calc_pivot};
@@ -122,35 +122,25 @@ impl World {
         }
     }
 
-    /// Freezes the world and cuts along the knife's plane as it is now. Later calls return the
-    /// first cut.
+    /// Freezes the world and cuts along the knife's plane as it is now, leaving the whole cake
+    /// above a cut that misses. Later calls return the first cut.
     pub fn cut(&mut self) -> Split {
         if let Phase::Cut { split, .. } = self.phase {
             return split;
         }
-        let split = calc_split(&self.cake_positions, &self.model.mesh.triangles, &self.knife.calc_plane());
-        let split = if self.is_cut_through() {
-            split
-        } else {
-            Split { above_m3: split.above_m3 + split.below_m3, below_m3: 0.0 }
-        };
+        let mut split = calc_split(&self.cake_positions, &self.model.mesh.triangles, &self.knife.calc_plane());
+        if !self.is_cut_through() {
+            split = Split { above_m3: split.above_m3 + split.below_m3, below_m3: 0.0 };
+        }
         self.phase = Phase::Cut { tick: self.tick, split };
         split
     }
 
-    /// Whether a cut now would divide the cake: its plane crosses the cake, and the blade sweeps
-    /// through the whole crossing, rather than stopping on the stand above it or ending beside
-    /// it.
+    /// Whether a cut now would divide the cake, rather than miss it, stop on the stand above it,
+    /// or end beside it.
     pub fn is_cut_through(&self) -> bool {
-        let stop_lower_m = self.calc_cut_lower_m();
-        let mut is_crossed = false;
-        let mut is_reached = true;
-        let plane = self.knife.calc_plane();
-        for_each_section_segment(&self.cake_positions, &self.model.mesh.triangles, &plane, |a, b| {
-            is_crossed = true;
-            is_reached &= self.knife.is_in_cut_path(a, stop_lower_m) && self.knife.is_in_cut_path(b, stop_lower_m);
-        });
-        is_crossed && is_reached
+        let cake = Solid { positions: &self.cake_positions, triangles: &self.model.mesh.triangles };
+        self.knife.is_cut_through(cake, self.calc_cut_lower_m())
     }
 
     /// How far the knife would lower through the cake to the stand or table, for drawing the cut.

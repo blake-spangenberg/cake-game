@@ -38,17 +38,17 @@ pub const MAX_CAKE_EXTENT_M: f64 = 0.25;
 /// with room for a carried cake's centimeter of hover.
 const KNIFE_REST_CLEARANCE_M: f64 = 0.02;
 /// The highest pivot, for the tallest cake allowed.
-pub const MAX_PIVOT: DVec3 = DVec3::new(0.0, STAND_TOP_Y_M + MAX_CAKE_EXTENT_M + KNIFE_REST_CLEARANCE_M, 0.0);
+pub const MAX_PIVOT: DVec3 = calc_pivot(MAX_CAKE_EXTENT_M);
+/// Where the cake starts, on the table beside the stand so reaching it costs input distance.
+pub const CAKE_SPAWN: DVec3 = DVec3::new(0.5, 0.0, 0.15);
+/// A cake whose center falls below this has left the table and respawns.
+pub const RESPAWN_BELOW_Y_M: f64 = -0.3;
 
 /// The point every cut plane passes through in a round on a cake measuring `cake_extent_m` at
 /// its longest, where the knife's edge rests: just above the tallest that cake can stand on the
 /// stand in any pose, so positioning it never meets the knife, and no higher, so a round cake is
 /// not left far below the blade.
-pub fn calc_pivot(cake_extent_m: f64) -> DVec3 {
+pub const fn calc_pivot(cake_extent_m: f64) -> DVec3 {
     let height_m = cake_extent_m.min(MAX_CAKE_EXTENT_M) + KNIFE_REST_CLEARANCE_M;
     DVec3::new(0.0, STAND_TOP_Y_M + height_m, 0.0)
 }
-/// Where the cake starts, on the table beside the stand so reaching it costs input distance.
-pub const CAKE_SPAWN: DVec3 = DVec3::new(0.5, 0.0, 0.15);
-/// A cake whose center falls below this has left the table and respawns.
-pub const RESPAWN_BELOW_Y_M: f64 = -0.3;

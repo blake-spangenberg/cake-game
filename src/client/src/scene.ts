@@ -24,6 +24,13 @@ const HALF_GAP_HALF_LIFE_S = 0.12;
 const CAP_SIZE_M = 1;
 /** Thickness of the invisible copy of the blade that takes its clicks, since the blade seen edge-on is a hairline. */
 const KNIFE_GRIP_THICKNESS_M = 0.04;
+/** Which way along the knife's normal each half keeps the cake. */
+const HALF_SIDES = [1, -1];
+/** A height above everything, so a clipping plane keeping only what lies above it keeps nothing. */
+const CLIP_ALL_Y_M = 100;
+
+/** One side of a cut cake, drawn clipped at the knife's plane and parted from the other along `offset`. */
+type Half = { group: THREE.Group; cap: THREE.Mesh; clip: THREE.Plane; side: number; offset: THREE.Vector3 };
 
 /** Every object the player sees, rebuilt per round from the game's mesh and poses. */
 export class Scene {
@@ -36,7 +43,7 @@ export class Scene {
   /** The point every cut plane passes through, fit to each round's cake. */
   private readonly pivot = new THREE.Vector3();
   private readonly halfGap = new Spring(0, HALF_GAP_HALF_LIFE_S);
-  private halves: { group: THREE.Group; cap: THREE.Mesh; clip: THREE.Plane; offset: THREE.Vector3 }[] = [];
+  private halves: Half[] = [];
   private cakeTexture: THREE.Texture | null = null;
 
   constructor(
@@ -66,20 +73,79 @@ export class Scene {
     return null;
   }
 
-  /** Replaces the cake with the game's mesh, whole, once its texture is decoded, and takes the round's pivot. */
+  /**
+   * Replaces the cake with the game's mesh, whole, once its texture is decoded, and takes the
+   * round's pivot. Builds the hidden halves and compiles their shaders now, since doing either
+   * when the blade reaches the cake stalls the cut's animation.
+   */
   async resetCake(game: Game): Promise<void> {
     const texture = await this.loadCakeTexture(game);
     this.pivot.set(0, game.get_pivot_y_m(), 0);
-    for (const half of this.halves) this.scene.remove(half.group, half.cap);
-    this.halves = [];
-    this.cake.clear();
-    this.cakeTexture?.dispose();
+    this.removeCake();
     this.cakeTexture = texture;
-    const mesh = new THREE.Mesh(buildCakeGeometry(game), this.buildCakeMaterial());
+    const geometry = buildCakeGeometry(game);
+    const mesh = new THREE.Mesh(geometry, this.buildCakeMaterial());
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     this.cake.add(mesh);
     this.cake.visible = true;
+    this.halves = HALF_SIDES.map((side, idx) => this.addHalf(geometry, side, idx));
+    this.warmHalves();
+  }
+
+  private removeCake(): void {
+    const roots = [this.cake, ...this.halves.flatMap((half) => [half.group, half.cap])];
+    for (const root of roots) {
+      root.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        object.geometry.dispose();
+        object.material.dispose();
+      });
+    }
+    this.scene.remove(...this.halves.flatMap((half) => [half.group, half.cap]));
+    this.halves = [];
+    this.cake.clear();
+    this.cakeTexture?.dispose();
+  }
+
+  /**
+   * One half, hidden until `showHalves`. Its cut face is a sponge plane masked to the half's
+   * inside through the stencil buffer, which works for any closed mesh without building cap
+   * geometry.
+   */
+  private addHalf(geometry: THREE.BufferGeometry, side: number, idx: number): Half {
+    const clip = new THREE.Plane();
+    const group = new THREE.Group();
+    const frosting = new THREE.Mesh(geometry, this.buildCakeMaterial({ clippingPlanes: [clip], clipShadows: true }));
+    frosting.castShadow = true;
+    group.add(frosting);
+    for (const [faces, stencilOp] of [
+      [THREE.BackSide, THREE.IncrementWrapStencilOp],
+      [THREE.FrontSide, THREE.DecrementWrapStencilOp],
+    ] as const) {
+      const counter = new THREE.Mesh(geometry, buildStencilCounter(faces, stencilOp, clip));
+      counter.renderOrder = idx + 1;
+      group.add(counter);
+    }
+    const cap = new THREE.Mesh(new THREE.PlaneGeometry(CAP_SIZE_M, CAP_SIZE_M), buildCapMaterial());
+    cap.renderOrder = idx + 1.5;
+    cap.onAfterRender = (renderer) => renderer.clearStencil();
+    // Hide the meshes, not the group: a raycast skips only meshes hidden themselves.
+    for (const mesh of [...group.children, cap]) mesh.visible = false;
+    this.scene.add(group, cap);
+    return { group, cap, clip, side, offset: new THREE.Vector3() };
+  }
+
+  /**
+   * Draws the hidden halves once, clipped away entirely, so every shader they need compiles now.
+   * `renderer.compile` would miss the shadow pass's clipped depth shader.
+   */
+  private warmHalves(): void {
+    const meshes = this.halves.flatMap((half) => [...half.group.children, half.cap]);
+    for (const half of this.halves) half.clip.set(new THREE.Vector3(0, 1, 0), -CLIP_ALL_Y_M);
+    for (const mesh of meshes) mesh.visible = true;
+    this.renderer.render(this.scene, this.camera);
+    for (const mesh of meshes) mesh.visible = false;
   }
 
   sync(game: Game): void {
@@ -113,40 +179,19 @@ export class Scene {
   /**
    * Swaps the whole cake for its two halves along the knife's plane, apart by just the blade's
    * thickness until `partHalves`, so the blade shows in the cut as it plunges.
-   * Each half's cut face is a sponge plane masked to the half's inside through the stencil
-   * buffer, which works for any closed mesh without building cap geometry.
    */
   showHalves(game: Game): void {
     const f = game.get_knife_frame();
     const normal = new THREE.Vector3(f[6], f[7], f[8]);
-    const geometry = buildCakeGeometry(game);
     this.halfGap.snap(this.layout.blade_thickness_m / 2 + BLADE_CLEARANCE_M);
-    for (const [idx, side] of [1, -1].entries()) {
-      const keepNormal = normal.clone().multiplyScalar(side);
-      const clip = new THREE.Plane().setFromNormalAndCoplanarPoint(keepNormal, this.pivot);
-      const group = new THREE.Group();
-      const placeLikeCake = (mesh: THREE.Mesh) => {
+    for (const half of this.halves) {
+      half.offset.copy(normal).multiplyScalar(half.side);
+      for (const mesh of half.group.children) {
         mesh.position.copy(this.cake.position);
         mesh.quaternion.copy(this.cake.quaternion);
-        group.add(mesh);
-      };
-      const frosting = new THREE.Mesh(geometry, this.buildCakeMaterial({ clippingPlanes: [clip], clipShadows: true }));
-      frosting.castShadow = true;
-      placeLikeCake(frosting);
-      for (const [faces, stencilOp] of [
-        [THREE.BackSide, THREE.IncrementWrapStencilOp],
-        [THREE.FrontSide, THREE.DecrementWrapStencilOp],
-      ] as const) {
-        const counter = new THREE.Mesh(geometry, buildStencilCounter(faces, stencilOp, clip));
-        counter.renderOrder = idx + 1;
-        placeLikeCake(counter);
+        mesh.visible = true;
       }
-      const cap = new THREE.Mesh(new THREE.PlaneGeometry(CAP_SIZE_M, CAP_SIZE_M), buildCapMaterial());
-      cap.renderOrder = idx + 1.5;
-      cap.onAfterRender = (renderer) => renderer.clearStencil();
-      this.scene.add(cap);
-      this.halves.push({ group, cap, clip, offset: keepNormal });
-      this.scene.add(group);
+      half.cap.visible = true;
     }
     this.cake.visible = false;
   }
@@ -179,6 +224,7 @@ export class Scene {
   render(dtS: number): void {
     const gap = this.halfGap.step(dtS);
     for (const half of this.halves) {
+      if (!half.cap.visible) continue;
       const cutPoint = this.pivot.clone().addScaledVector(half.offset, gap);
       half.group.position.copy(half.offset).multiplyScalar(gap);
       half.clip.setFromNormalAndCoplanarPoint(half.offset, cutPoint);

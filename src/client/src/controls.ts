@@ -35,9 +35,9 @@ const PROBE_STEP = 0.01;
  * Turns mouse drags into the core's per-tick input. Every drag moves its object by how far the
  * mouse travels from where it pressed, never toward the cursor: drag the cake to carry it, the
  * knife to tilt (sideways, the handles following the mouse and a blade grab tilting the other way)
- * and lower it (up and down), the stand to turn it by circling its axis,
- * and anywhere else to swing the camera. Every input eases through a
- * spring, and a drag stops where the core stops its object.
+ * and lower it (up and down), the stand to turn it by circling its axis, and anywhere else to
+ * swing the camera. Every input eases through a spring, and a drag stops where the core stops its
+ * object.
  */
 export class Controls {
   private drag: Drag | null = null;
