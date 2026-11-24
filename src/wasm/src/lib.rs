@@ -9,7 +9,7 @@ use cake_core::knife::{
 use cake_core::replay::{build_scripted_inputs, replay};
 use cake_core::sim::{Phase, ROUND_TICKS, TICKS_PER_S, World};
 use cake_core::table::{
-    MAX_PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M, TABLE_HALF_X_M, TABLE_HALF_Z_M,
+    PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M, TABLE_HALF_X_M, TABLE_HALF_Z_M,
 };
 use cake_core::{cut::DENSITY_G_PER_M3, cut::Split, input};
 use wasm_bindgen::prelude::*;
@@ -29,8 +29,8 @@ pub struct Layout {
     pub stand_radius_m: f64,
     pub stand_top_y_m: f64,
     pub stand_plate_thickness_m: f64,
-    /// The pivot's height for the tallest cake, which bounds every round's.
-    pub max_pivot_y_m: f64,
+    /// The height of the point every cut plane passes through.
+    pub pivot_y_m: f64,
     pub blade_arc_radius_m: f64,
     pub blade_half_span_m: f64,
     pub blade_back_m: f64,
@@ -53,7 +53,7 @@ pub fn get_layout() -> Layout {
         stand_radius_m: STAND_RADIUS_M,
         stand_top_y_m: STAND_TOP_Y_M,
         stand_plate_thickness_m: STAND_PLATE_THICKNESS_M,
-        max_pivot_y_m: MAX_PIVOT.y,
+        pivot_y_m: PIVOT.y,
         blade_arc_radius_m: BLADE_ARC_RADIUS_M,
         blade_half_span_m: BLADE_HALF_SPAN_M,
         blade_back_m: BLADE_BACK_M,
@@ -128,12 +128,12 @@ impl Game {
         self.world.is_cut_through()
     }
 
-    /// How far the knife lowers through the cake when it cuts, in meters.
+    /// How far below the pivot the knife lowers through the cake when it cuts, in meters.
     pub fn calc_cut_lower_m(&self) -> f64 {
         self.world.calc_cut_lower_m()
     }
 
-    /// How far the knife lowers before its edge meets the cake, in meters.
+    /// How far below the pivot the knife's edge meets the cake, in meters.
     pub fn calc_cake_touch_lower_m(&self) -> f64 {
         self.world.calc_cake_touch_lower_m()
     }
@@ -161,16 +161,11 @@ impl Game {
         self.world.is_stand_blocked()
     }
 
-    /// The height of the point every cut plane passes through this round, where the knife's edge
-    /// rests, in meters.
-    pub fn get_pivot_y_m(&self) -> f64 {
-        self.world.get_knife().pivot.y
-    }
-
-    /// Tilt in radians, then lowering in meters.
+    /// Tilt in radians, then in meters the edge's lowering below the pivot and the lowering it
+    /// rests at, which floats with the cake's height.
     pub fn get_knife_pose(&self) -> Vec<f64> {
         let knife = self.world.get_knife();
-        vec![knife.tilt_rad, knife.lower_m]
+        vec![knife.tilt_rad, knife.lower_m, knife.rest_m]
     }
 
     /// The knife's unit edge, down, and normal vectors, flattened.

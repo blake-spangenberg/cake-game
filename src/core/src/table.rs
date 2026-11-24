@@ -32,23 +32,18 @@ pub const STAND_PARTS: [StandPart; 3] = [
     },
     StandPart { radius_m: STAND_BASE_RADIUS_M, y0_m: 0.0, y1_m: STAND_BASE_THICKNESS_M },
 ];
-/// The longest any cake measures in any direction, so no resting pose stands taller.
-pub const MAX_CAKE_EXTENT_M: f64 = 0.25;
-/// How far the resting knife's edge clears the tallest the round's cake can stand on the stand,
-/// with room for a carried cake's centimeter of hover.
-const KNIFE_REST_CLEARANCE_M: f64 = 0.02;
-/// The highest pivot, for the tallest cake allowed.
-pub const MAX_PIVOT: DVec3 = calc_pivot(MAX_CAKE_EXTENT_M);
+/// The longest side of any cake's bounding box.
+pub const MAX_CAKE_SIDE_M: f64 = 0.25;
+/// The most any cake's [`crate::mesh::Mesh::calc_extent_bound`] may be, so no pose of it stands
+/// taller.
+pub const MAX_CAKE_EXTENT_M: f64 = 0.34;
+/// How far the pivot clears the tallest any cake can stand on the stand, with room for a carried
+/// cake's centimeter of hover.
+const PIVOT_CLEARANCE_M: f64 = 0.02;
+/// The point every cut plane passes through, high enough that no cake in any pose on the stand
+/// reaches it.
+pub const PIVOT: DVec3 = DVec3::new(0.0, STAND_TOP_Y_M + MAX_CAKE_EXTENT_M + PIVOT_CLEARANCE_M, 0.0);
 /// Where the cake starts, on the table beside the stand so reaching it costs input distance.
 pub const CAKE_SPAWN: DVec3 = DVec3::new(0.5, 0.0, 0.15);
 /// A cake whose center falls below this has left the table and respawns.
 pub const RESPAWN_BELOW_Y_M: f64 = -0.3;
-
-/// The point every cut plane passes through in a round on a cake measuring `cake_extent_m` at
-/// its longest, where the knife's edge rests: just above the tallest that cake can stand on the
-/// stand in any pose, so positioning it never meets the knife, and no higher, so a round cake is
-/// not left far below the blade.
-pub const fn calc_pivot(cake_extent_m: f64) -> DVec3 {
-    let height_m = cake_extent_m.min(MAX_CAKE_EXTENT_M) + KNIFE_REST_CLEARANCE_M;
-    DVec3::new(0.0, STAND_TOP_Y_M + height_m, 0.0)
-}

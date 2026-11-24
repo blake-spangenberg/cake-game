@@ -96,6 +96,64 @@ body {
   opacity: 0.8;
 }
 
-#credit a {
+#credit a,
+#credits a {
   color: inherit;
+}
+
+#show-credits {
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  opacity: 0.8;
+  cursor: pointer;
+}
+
+#credits {
+  max-width: 480px;
+  max-height: 90vh;
+  padding: 20px 28px;
+  border: none;
+  border-radius: 8px;
+  background: #2a2724;
+  color: #f4ead8;
+  font-size: 14px;
+}
+
+#credits::backdrop {
+  background: rgb(0 0 0 / 50%);
+}
+
+#credits h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+}
+
+#credits h2 {
+  margin: 16px 0 6px;
+  font-size: 16px;
+}
+
+#credits ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+#credits form {
+  margin-top: 16px;
+  text-align: right;
+}
+
+#credits form button {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: #f4ead8;
+  font-size: 14px;
+  cursor: pointer;
 }

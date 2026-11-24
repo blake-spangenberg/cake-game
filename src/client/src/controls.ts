@@ -45,16 +45,19 @@ export class Controls {
   private readonly raycaster = new THREE.Raycaster();
   private readonly tilt = new Spring(0, KNIFE_HALF_LIFE_S);
   private readonly lower = new Spring(0, KNIFE_RETURN_HALF_LIFE_S);
-  /** The tilt and lowering last sent, to tell a knife stopped by a solid from one still easing. */
+  /**
+   * The tilt and lowering last sent, to tell a knife stopped by a solid from one still easing. The
+   * lowering sent is from where the knife rests, which floats with the cake's height.
+   */
   private sentTiltRad = 0;
   private sentLowerM = 0;
   /** The lowering sent the tick before last, to tell a knife still being pressed down from one at rest. */
   private prevSentLowerM = 0;
+  /** How far below the pivot the knife's edge was last tick. */
+  private knifeLowerM = 0;
   private readonly stand = new Spring(0, STAND_HALF_LIFE_S);
   private readonly handX = new Spring(0, HAND_HALF_LIFE_S);
   private readonly handZ = new Spring(0, HAND_HALF_LIFE_S);
-  /** The round's pivot height, where the knife's edge rests. */
-  private pivotYM = 0;
 
   constructor(
     private readonly scene: Scene,
@@ -80,8 +83,8 @@ export class Controls {
   }
 
   reset(game: Game): void {
-    const knifeTiltRad = game.get_knife_pose()[0];
-    this.pivotYM = game.get_pivot_y_m();
+    const [knifeTiltRad, knifeLowerM] = game.get_knife_pose();
+    this.knifeLowerM = knifeLowerM;
     this.drag = null;
     this.tilt.snap(knifeTiltRad);
     this.sentTiltRad = knifeTiltRad;
@@ -97,12 +100,14 @@ export class Controls {
    */
   stepInput(game: Game): Int32Array {
     const dtS = 1 / this.layout.ticks_per_s;
-    const [knifeTiltRad, knifeLowerM] = game.get_knife_pose();
+    const [knifeTiltRad, knifeLowerM, knifeRestM] = game.get_knife_pose();
+    this.knifeLowerM = knifeLowerM;
     if (Math.abs(knifeTiltRad - this.sentTiltRad) > this.layout.angle_unit_rad / 2) this.tilt.snap(knifeTiltRad);
     // Only a press is capped: a knife the core lifted over a bump while tilting keeps the
     // pressed lowering, so it settles back down past the bump.
     const isPressing = this.sentLowerM > this.prevSentLowerM;
-    if (isPressing && knifeLowerM < this.sentLowerM - this.layout.position_unit_m / 2) this.lower.capAt(knifeLowerM + LOWER_SLACK_M);
+    const loweredM = knifeLowerM - knifeRestM;
+    if (isPressing && loweredM < this.sentLowerM - this.layout.position_unit_m / 2) this.lower.capAt(loweredM + LOWER_SLACK_M);
     this.prevSentLowerM = this.sentLowerM;
     const standRad = game.get_stand_angle_rad();
     if (game.is_stand_blocked()) this.stand.snap(standRad);
@@ -165,7 +170,10 @@ export class Controls {
     } else if (drag.kind === "knife") {
       const maxTilt = this.layout.max_tilt_rad;
       this.tilt.target = THREE.MathUtils.clamp(this.tilt.target + drag.tiltSign * dxPx * TILT_RAD_PER_PX, -maxTilt, maxTilt);
-      this.lower.target = THREE.MathUtils.clamp(this.lower.target + dyPx * LOWER_M_PER_PX, 0, this.layout.max_pivot_y_m);
+      // Far enough to reach the table at any tilt. The core stops the knife there, and the press cap
+      // stops the drag where it does.
+      const maxLowerM = this.layout.pivot_y_m / Math.cos(maxTilt);
+      this.lower.target = THREE.MathUtils.clamp(this.lower.target + dyPx * LOWER_M_PER_PX, 0, maxLowerM);
     } else {
       this.turnStand(drag);
     }
@@ -189,9 +197,9 @@ export class Controls {
 
   /** Which way the knife tilts for the handles to follow the mouse rightward. */
   private calcTiltSign(): number {
-    const handleHeightM = this.layout.blade_back_m + this.layout.handle_len_m;
-    const pivot = new THREE.Vector3(0, this.pivotYM, 0);
-    const handleAt = (tilt: number) => new THREE.Vector3(Math.sin(tilt), Math.cos(tilt), 0).multiplyScalar(handleHeightM).add(pivot);
+    const handleAbovePivotM = this.layout.blade_back_m + this.layout.handle_len_m - this.knifeLowerM;
+    const pivot = new THREE.Vector3(0, this.layout.pivot_y_m, 0);
+    const handleAt = (tilt: number) => new THREE.Vector3(Math.sin(tilt), Math.cos(tilt), 0).multiplyScalar(handleAbovePivotM).add(pivot);
     return this.calcScreenDirection(handleAt(this.tilt.value), handleAt(this.tilt.value + PROBE_STEP));
   }
 

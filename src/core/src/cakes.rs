@@ -4,7 +4,7 @@ use rapier3d::math::Vec3;
 use rapier3d::prelude::SharedShape;
 
 use crate::mesh::{Mesh, MeshError, calc_arc_outline};
-use crate::table::{MAX_CAKE_EXTENT_M, STAND_RADIUS_M};
+use crate::table::{MAX_CAKE_EXTENT_M, MAX_CAKE_SIDE_M, STAND_RADIUS_M};
 
 /// A cake's render mesh, how its surface is drawn, and the convex pieces its collider is built
 /// from, in its local frame with the serving side down at y = 0.
@@ -48,7 +48,8 @@ pub enum CakeError {
     BadSkin,
     /// The mesh is wound inside out, or encloses no volume.
     NotOutward,
-    /// The model's bounding box is longer than [`MAX_CAKE_EXTENT_M`] along an axis.
+    /// The model's bounding box is longer than [`MAX_CAKE_SIDE_M`] along an axis, or its extent
+    /// bound exceeds [`MAX_CAKE_EXTENT_M`].
     TooLong,
     /// The model does not rest on the table's top at y = 0, or reaches past the stand's plate
     /// when centered on it.
@@ -83,7 +84,9 @@ impl CakeModel {
         }
         let positions = &self.mesh.positions;
         let (min, max) = positions.iter().fold((positions[0], positions[0]), |(min, max), &p| (min.min(p), max.max(p)));
-        if (max - min).max_element() > MAX_CAKE_EXTENT_M as f32 {
+        if (max - min).max_element() > MAX_CAKE_SIDE_M as f32
+            || self.mesh.calc_extent_bound() > MAX_CAKE_EXTENT_M as f32
+        {
             return Err(CakeError::TooLong);
         }
         let radius_m = positions.iter().map(|p| libm::hypotf(p.x, p.z)).fold(0.0, f32::max);

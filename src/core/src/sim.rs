@@ -7,8 +7,8 @@ use rapier3d::prelude::*;
 use crate::cakes::CakeModel;
 use crate::cut::{Split, calc_split};
 use crate::input::{Input, KnifeInput, calc_radians};
-use crate::knife::{Knife, Solid, calc_sweep_reach};
-use crate::table::{CAKE_SPAWN, RESPAWN_BELOW_Y_M, calc_pivot};
+use crate::knife::{Knife, Solid, calc_rest_m, calc_sweep_reach};
+use crate::table::{CAKE_SPAWN, RESPAWN_BELOW_Y_M};
 use hand::Grip;
 use setup::{StandPlate, build_cake_shape, insert_cake, insert_knife, insert_stand, insert_table};
 
@@ -65,11 +65,10 @@ pub struct World {
 }
 
 impl World {
-    /// A world whose knife rests at `knife_tilt_rad` over a pivot fit to the cake, and that cuts
-    /// itself at `round_ticks`, or never with `None`.
+    /// A world whose knife rests at `knife_tilt_rad` over the cake, and that cuts itself at
+    /// `round_ticks`, or never with `None`.
     pub fn create(model: CakeModel, knife_tilt_rad: f64, round_ticks: Option<u32>) -> World {
-        let pivot = calc_pivot(model.mesh.calc_extent_bound() as f64);
-        let knife = Knife { pivot, tilt_rad: knife_tilt_rad, lower_m: 0.0 };
+        let knife = Knife { tilt_rad: knife_tilt_rad, rest_m: 0.0, lower_m: 0.0 };
         let mut physics = PhysicsWorld::new();
         physics.integration_parameters.dt = DT_S as f32;
         physics.integration_parameters.length_unit = LENGTH_UNIT_M;
@@ -102,6 +101,8 @@ impl World {
             phase: Phase::Playing,
         };
         world.update_cake_positions();
+        let rest_m = calc_rest_m(world.calc_cake_height_m());
+        world.knife = Knife { rest_m, lower_m: rest_m, ..world.knife };
         world
     }
 
@@ -210,7 +211,7 @@ impl World {
         for value in hand.translation().to_array() {
             hash.write(&value.to_bits().to_le_bytes());
         }
-        for value in [self.knife.tilt_rad, self.knife.lower_m, self.stand_angle_rad] {
+        for value in [self.knife.tilt_rad, self.knife.rest_m, self.knife.lower_m, self.stand_angle_rad] {
             hash.write(&value.to_bits().to_le_bytes());
         }
         hash.write(&self.fallen_ticks.to_le_bytes());
@@ -271,7 +272,8 @@ impl World {
     /// knife.
     fn calc_stand_reach_rad(&self, to_rad: f64) -> f64 {
         let is_riding = self.grip.is_none() && self.is_on_stand();
-        if !is_riding || self.knife.lower_m == 0.0 {
+        // A cake turning on the stand keeps its height, so it stays clear of the resting knife.
+        if !is_riding || self.knife.lower_m <= self.knife.rest_m {
             return to_rad;
         }
         let from_rad = self.stand_angle_rad;
@@ -293,9 +295,19 @@ impl World {
         let plate = self.stand_plate.as_solid();
         // A held cake meets the knife's collider instead, so the blade holds its place against it.
         let solids: &[Solid] = if self.grip.is_some() { &[plate] } else { &[cake, plate] };
+        self.knife.float_over(self.calc_cake_height_m(), DT_S);
         self.knife.step(input, solids);
         let pose = Pose::from_parts(self.knife.calc_edge_middle().as_vec3(), self.knife.calc_rotation());
         self.physics.bodies[self.knife_body].set_next_kinematic_position(pose);
+    }
+
+    /// How tall the cake stands as it is posed now.
+    fn calc_cake_height_m(&self) -> f64 {
+        let (low_m, high_m) = self
+            .cake_positions
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), p| (low.min(p.y), high.max(p.y)));
+        high_m - low_m
     }
 
     /// Respawns a cake that fell off the table, once it has fallen for a while.

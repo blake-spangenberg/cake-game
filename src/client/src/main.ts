@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import init, { Game, get_layout } from "@wasm/cake_wasm.js";
-import { CAKES, type CakeEntry, buildCreditHtml, fetchCakeFile } from "./cakes";
+import { CAKES, type CakeEntry, buildCreditHtml, buildCreditsList, fetchCakeFile } from "./cakes";
 import { Controls } from "./controls";
 import { Orbit } from "./orbit";
 import { Scene } from "./scene";
@@ -17,6 +17,8 @@ const CUT_ROCK_RAD = 0.36;
 const CUT_SETTLE_SHARE = 0.5;
 /** The picker's value for a random cake each round. */
 const RANDOM_CAKE = "random";
+/** The camera orbits this far above the stand's plate, among a cake set on it and the knife resting over it. */
+const ORBIT_ABOVE_STAND_M = 0.13;
 
 await init();
 const layout = get_layout();
@@ -34,9 +36,11 @@ const picker = document.querySelector<HTMLSelectElement>("#cake-picker")!;
 const credit = document.querySelector<HTMLDivElement>("#credit")!;
 
 const scene = new Scene(canvas, layout);
-/** The camera orbits halfway between the stand's plate and the knife's edge resting over the tallest cake. */
-const orbit = new Orbit(scene.camera, new THREE.Vector3(0, (layout.max_pivot_y_m + layout.stand_top_y_m) / 2, 0));
+const orbit = new Orbit(scene.camera, new THREE.Vector3(0, layout.stand_top_y_m + ORBIT_ABOVE_STAND_M, 0));
 picker.append(new Option("Random", RANDOM_CAKE), ...CAKES.map((cake) => new Option(cake.name, cake.id)));
+document.querySelector("#cake-credits")!.replaceWith(buildCreditsList());
+const credits = document.querySelector<HTMLDialogElement>("#credits")!;
+document.querySelector("#show-credits")!.addEventListener("click", () => credits.showModal());
 const firstCake = pickCake();
 credit.replaceChildren(buildCreditHtml(firstCake));
 let game = new Game(roundTicks, await fetchCakeFile(firstCake));
@@ -47,6 +51,8 @@ const controls = new Controls(scene, orbit, layout, game);
  * to show once it lands.
  */
 let cutting: { startMs: number; fromLowerM: number; toLowerM: number; splitLowerM: number | null; split: Float64Array } | null = null;
+/** Counts round starts, so a round that finished loading after a later one began is dropped. */
+let roundStarts = 0;
 let lagMs = 0;
 let lastFrameMs = performance.now();
 let nextFrameMs = lastFrameMs;
@@ -58,14 +64,22 @@ function pickCake(): CakeEntry {
   return CAKES.find((cake) => cake.id === picker.value)!;
 }
 
+/** Loads the next round while this one plays on, then swaps every part over at once. */
 async function startRound(): Promise<void> {
+  const start = ++roundStarts;
   const cake = pickCake();
-  const file = await fetchCakeFile(cake);
-  credit.replaceChildren(buildCreditHtml(cake));
+  const next = new Game(roundTicks, await fetchCakeFile(cake));
+  const texture = await scene.loadCakeTexture(next);
+  if (start !== roundStarts) {
+    next.free();
+    texture?.dispose();
+    return;
+  }
   game.free();
-  game = new Game(roundTicks, file);
+  game = next;
+  credit.replaceChildren(buildCreditHtml(cake));
   controls.reset(game);
-  await scene.resetCake(game);
+  scene.resetCake(game, texture);
   cutting = null;
   result.hidden = true;
 }
@@ -141,11 +155,11 @@ function onFrame(nowMs: number): void {
   scene.render(elapsedMs / 1000);
 }
 
+scene.resetCake(game, await scene.loadCakeTexture(game));
 cutButton.addEventListener("click", () => startCut(game.cut(), performance.now()));
 document.querySelector("#again")!.addEventListener("click", () => void startRound());
 picker.addEventListener("change", () => {
   picker.blur();
   void startRound();
 });
-await scene.resetCake(game);
 requestAnimationFrame(onFrame);

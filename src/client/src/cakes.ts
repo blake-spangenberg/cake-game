@@ -55,6 +55,17 @@ export function buildCreditHtml(cake: CakeEntry): HTMLElement {
   return credit;
 }
 
+/** Every cake's credit line under its in-game name, alphabetically, for the credits page. */
+export function buildCreditsList(): HTMLUListElement {
+  const list = document.createElement("ul");
+  for (const cake of [...CAKES].sort((a, b) => a.name.localeCompare(b.name))) {
+    const item = document.createElement("li");
+    item.append(`${cake.name} `, buildCreditHtml(cake));
+    list.append(item);
+  }
+  return list;
+}
+
 function buildLink(text: string, href: string): HTMLAnchorElement {
   const link = document.createElement("a");
   link.href = href;

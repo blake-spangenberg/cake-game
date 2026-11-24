@@ -40,8 +40,8 @@ export class Scene {
   private readonly cake = new THREE.Group();
   private readonly knife = new THREE.Group();
   private readonly stand = new THREE.Group();
-  /** The point every cut plane passes through, fit to each round's cake. */
-  private readonly pivot = new THREE.Vector3();
+  /** The point every cut plane passes through. */
+  private readonly pivot: THREE.Vector3;
   private readonly halfGap = new Spring(0, HALF_GAP_HALF_LIFE_S);
   private halves: Half[] = [];
   private cakeTexture: THREE.Texture | null = null;
@@ -50,6 +50,7 @@ export class Scene {
     canvas: HTMLCanvasElement,
     private readonly layout: Layout,
   ) {
+    this.pivot = new THREE.Vector3(0, layout.pivot_y_m, 0);
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true, powerPreference: "high-performance" });
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -74,13 +75,11 @@ export class Scene {
   }
 
   /**
-   * Replaces the cake with the game's mesh, whole, once its texture is decoded, and takes the
-   * round's pivot. Builds the hidden halves and compiles their shaders now, since doing either
-   * when the blade reaches the cake stalls the cut's animation.
+   * Replaces the cake with the game's mesh, whole, skinned with `texture` from `loadCakeTexture`.
+   * Builds the hidden halves and compiles their shaders now, since doing either when the blade
+   * reaches the cake stalls the cut's animation.
    */
-  async resetCake(game: Game): Promise<void> {
-    const texture = await this.loadCakeTexture(game);
-    this.pivot.set(0, game.get_pivot_y_m(), 0);
+  resetCake(game: Game, texture: THREE.Texture | null): void {
     this.removeCake();
     this.cakeTexture = texture;
     const geometry = buildCakeGeometry(game);
@@ -197,7 +196,7 @@ export class Scene {
   }
 
   /** The cake's texture, mipmapped and as sharp at grazing angles as the GPU allows, or none for a plain cake. */
-  private async loadCakeTexture(game: Game): Promise<THREE.Texture | null> {
+  async loadCakeTexture(game: Game): Promise<THREE.Texture | null> {
     const file = game.get_cake_texture();
     if (file.length === 0) return null;
     const bitmap = await createImageBitmap(new Blob([new Uint8Array(file)], { type: "image/webp" }), {
