@@ -1,6 +1,11 @@
 use std::collections::BTreeMap;
 
+use rapier3d::glamx::DVec3;
 use rapier3d::math::Vec3;
+
+/// How many directions [`Mesh::calc_width_range_m`] spreads over a hemisphere, about 9 degrees
+/// apart.
+const WIDTH_DIRECTION_LEN: u32 = 256;
 
 /// A triangle mesh in a cake's local frame, meters, counter-clockwise winding seen from outside.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -86,6 +91,36 @@ impl Mesh {
         let (min, max) = self.positions.iter().fold((first, first), |(min, max), &p| (min.min(p), max.max(p)));
         2.0 * self.calc_max_distance_from((min + max) / 2.0)
     }
+
+    /// The least and greatest of the mesh's widths along a fixed spread of directions: about how
+    /// tall it stands in its flattest and its tallest pose.
+    pub(crate) fn calc_width_range_m(&self) -> (f64, f64) {
+        calc_width_directions().fold((f64::INFINITY, f64::NEG_INFINITY), |(least_m, greatest_m), direction| {
+            let width_m = self.calc_width_m(direction);
+            (least_m.min(width_m), greatest_m.max(width_m))
+        })
+    }
+
+    fn calc_width_m(&self, direction: DVec3) -> f64 {
+        let (low_m, high_m) = self.positions.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), p| {
+            let along_m = p.as_dvec3().dot(direction);
+            (low.min(along_m), high.max(along_m))
+        });
+        high_m - low_m
+    }
+}
+
+/// Directions spread evenly over a hemisphere, which suffices since a width along a direction is
+/// the width along its opposite, plus the axes, along which a model's flat faces usually lie.
+fn calc_width_directions() -> impl Iterator<Item = DVec3> {
+    let golden_angle_rad = core::f64::consts::PI * (3.0 - libm::sqrt(5.0));
+    let spread = (0..WIDTH_DIRECTION_LEN).map(move |i| {
+        let y = 1.0 - (i as f64 + 0.5) / WIDTH_DIRECTION_LEN as f64;
+        let radius = libm::sqrt(1.0 - y * y);
+        let angle_rad = golden_angle_rad * i as f64;
+        DVec3::new(radius * libm::cos(angle_rad), y, radius * libm::sin(angle_rad))
+    });
+    [DVec3::X, DVec3::Y, DVec3::Z].into_iter().chain(spread)
 }
 
 /// `point_len` points evenly spaced along a circular arc from `angle0` to `angle1` inclusive,

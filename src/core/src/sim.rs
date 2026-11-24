@@ -30,6 +30,11 @@ const CAKE_FRICTION: f32 = 0.9;
 /// gravity keeps driving, it stops an off-balance cake rocking or rolling on its rim outright,
 /// while tipping over still outpaces it.
 const ROLL_RESISTANCE_RAD_PER_S2: f32 = 80.0;
+/// Across this gap between the cake's bounding box and the stand's rim, the resting knife turns
+/// from waiting over the cake's middle height to following its height as posed. The slow float
+/// needs this much warning to rise clear of a cake carried in at its tallest at up to the hand's
+/// full speed, with the blade tilted toward it; at 0.15 m such a cake meets the blade.
+const REST_APPROACH_M: f64 = 0.25;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Phase {
@@ -55,6 +60,9 @@ pub struct World {
     knife_colliders: Vec<ColliderHandle>,
     model: CakeModel,
     bounding_radius_m: f64,
+    /// Halfway between how tall the cake stands in its flattest and its tallest pose, which the
+    /// knife rests over while the cake is away from the stand.
+    waiting_height_m: f64,
     cake_positions: Vec<DVec3>,
     /// Ticks since the cake fell off the table.
     fallen_ticks: u32,
@@ -68,7 +76,7 @@ impl World {
     /// A world whose knife rests at `knife_tilt_rad` over the cake, and that cuts itself at
     /// `round_ticks`, or never with `None`.
     pub fn create(model: CakeModel, knife_tilt_rad: f64, round_ticks: Option<u32>) -> World {
-        let knife = Knife { tilt_rad: knife_tilt_rad, rest_m: 0.0, lower_m: 0.0 };
+        let knife = Knife { tilt_rad: knife_tilt_rad, rest_m: 0.0, rest_lead_m: 0.0, lower_m: 0.0 };
         let mut physics = PhysicsWorld::new();
         physics.integration_parameters.dt = DT_S as f32;
         physics.integration_parameters.length_unit = LENGTH_UNIT_M;
@@ -79,6 +87,7 @@ impl World {
         let (knife_body, knife_colliders) = insert_knife(&mut physics, &knife);
         let com = physics.bodies[cake].mass_properties().local_mprops.local_com;
         let bounding_radius_m = model.mesh.calc_max_distance_from(com) as f64;
+        let (flattest_m, tallest_m) = model.mesh.calc_width_range_m();
         let mut world = World {
             physics,
             cake,
@@ -93,6 +102,7 @@ impl World {
             knife_colliders,
             model,
             bounding_radius_m,
+            waiting_height_m: (flattest_m + tallest_m) / 2.0,
             cake_positions: Vec::new(),
             fallen_ticks: 0,
             knife,
@@ -101,8 +111,8 @@ impl World {
             phase: Phase::Playing,
         };
         world.update_cake_positions();
-        let rest_m = calc_rest_m(world.calc_cake_height_m());
-        world.knife = Knife { rest_m, lower_m: rest_m, ..world.knife };
+        let rest_m = calc_rest_m(world.calc_rest_height_m());
+        world.knife = Knife { rest_m, rest_lead_m: rest_m, lower_m: rest_m, ..world.knife };
         world
     }
 
@@ -211,7 +221,8 @@ impl World {
         for value in hand.translation().to_array() {
             hash.write(&value.to_bits().to_le_bytes());
         }
-        for value in [self.knife.tilt_rad, self.knife.rest_m, self.knife.lower_m, self.stand_angle_rad] {
+        let knife = &self.knife;
+        for value in [knife.tilt_rad, knife.rest_m, knife.rest_lead_m, knife.lower_m, self.stand_angle_rad] {
             hash.write(&value.to_bits().to_le_bytes());
         }
         hash.write(&self.fallen_ticks.to_le_bytes());
@@ -295,10 +306,17 @@ impl World {
         let plate = self.stand_plate.as_solid();
         // A held cake meets the knife's collider instead, so the blade holds its place against it.
         let solids: &[Solid] = if self.grip.is_some() { &[plate] } else { &[cake, plate] };
-        self.knife.float_over(self.calc_cake_height_m(), DT_S);
+        self.knife.float_over(self.calc_rest_height_m(), DT_S);
         self.knife.step(input, solids);
         let pose = Pose::from_parts(self.knife.calc_edge_middle().as_vec3(), self.knife.calc_rotation());
         self.physics.bodies[self.knife_body].set_next_kinematic_position(pose);
+    }
+
+    /// The cake height the knife rests over: the cake's as posed at the stand, easing to its
+    /// waiting height [`REST_APPROACH_M`] away.
+    fn calc_rest_height_m(&self) -> f64 {
+        let nearness = self.calc_stand_nearness(REST_APPROACH_M);
+        self.waiting_height_m + (self.calc_cake_height_m() - self.waiting_height_m) * nearness
     }
 
     /// How tall the cake stands as it is posed now.

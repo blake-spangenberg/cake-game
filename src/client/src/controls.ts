@@ -7,8 +7,9 @@ import { Spring } from "./spring";
 type Drag =
   | { kind: "camera" }
   | { kind: "cake"; grabAt: [number, number, number]; metersPerPx: number }
-  | { kind: "knife"; tiltSign: number }
+  | { kind: "knife"; alongEdgeM: number; aboveEdgeM: number; tiltSign: number }
   | { kind: "stand"; axisPx: THREE.Vector2; lastBearingRad: number; turnSign: number };
+type KnifeDrag = Extract<Drag, { kind: "knife" }>;
 
 const FLAG_HOLDING = 1 << 0;
 const ENCODED_LEN = 9;
@@ -30,14 +31,18 @@ const STAND_HALF_LIFE_S = 0.08;
 const STAND_MAX_LEAD_RAD = 0.5;
 /** Nudge used to find which way on screen a control moves an object. */
 const PROBE_STEP = 0.01;
+/**
+ * Below this rightward travel on screen from a probe nudge, the grabbed point of the knife moves too
+ * little sideways to tell a direction, so the last direction holds.
+ */
+const TILT_SIGN_MIN_TRAVEL_PX = 0.02;
 
 /**
  * Turns mouse drags into the core's per-tick input. Every drag moves its object by how far the
  * mouse travels from where it pressed, never toward the cursor: drag the cake to carry it, the
- * knife to tilt (sideways, the handles following the mouse and a blade grab tilting the other way)
- * and lower it (up and down), the stand to turn it by circling its axis, and anywhere else to
- * swing the camera. Every input eases through a spring, and a drag stops where the core stops its
- * object.
+ * knife to tilt (sideways, the grabbed point following the mouse) and lower it (up and down), the
+ * stand to turn it by circling its axis, and anywhere else to swing the camera. Every input eases
+ * through a spring, and a drag stops where the core stops its object.
  */
 export class Controls {
   private drag: Drag | null = null;
@@ -55,6 +60,9 @@ export class Controls {
   private prevSentLowerM = 0;
   /** How far below the pivot the knife's edge was last tick. */
   private knifeLowerM = 0;
+  /** The knife's edge direction and downward direction last tick. */
+  private readonly knifeEdge = new THREE.Vector3();
+  private readonly knifeDown = new THREE.Vector3();
   private readonly stand = new Spring(0, STAND_HALF_LIFE_S);
   private readonly handX = new Spring(0, HAND_HALF_LIFE_S);
   private readonly handZ = new Spring(0, HAND_HALF_LIFE_S);
@@ -85,6 +93,7 @@ export class Controls {
   reset(game: Game): void {
     const [knifeTiltRad, knifeLowerM] = game.get_knife_pose();
     this.knifeLowerM = knifeLowerM;
+    this.readKnifeFrame(game);
     this.drag = null;
     this.tilt.snap(knifeTiltRad);
     this.sentTiltRad = knifeTiltRad;
@@ -102,6 +111,7 @@ export class Controls {
     const dtS = 1 / this.layout.ticks_per_s;
     const [knifeTiltRad, knifeLowerM, knifeRestM] = game.get_knife_pose();
     this.knifeLowerM = knifeLowerM;
+    this.readKnifeFrame(game);
     if (Math.abs(knifeTiltRad - this.sentTiltRad) > this.layout.angle_unit_rad / 2) this.tilt.snap(knifeTiltRad);
     // Only a press is capped: a knife the core lifted over a bump while tilting keeps the
     // pressed lowering, so it settles back down past the bump.
@@ -136,10 +146,9 @@ export class Controls {
       this.handX.snap(hit.point.x);
       this.handZ.snap(hit.point.z);
       this.drag = { kind: "cake", grabAt, metersPerPx: this.calcMetersPerPx(hit.point) };
-    } else if (hit?.kind === "handle" || hit?.kind === "blade") {
+    } else if (hit?.kind === "knife") {
       this.lower.halfLifeS = KNIFE_HALF_LIFE_S;
-      const bladeSign = hit.kind === "blade" ? -1 : 1;
-      this.drag = { kind: "knife", tiltSign: bladeSign * this.calcTiltSign() };
+      this.drag = this.buildKnifeDrag(hit.point);
     } else if (hit?.kind === "stand") {
       const axisPx = this.toClientPx(new THREE.Vector3(0, hit.point.y, 0));
       const lastBearingRad = calcBearingRad(axisPx, this.lastPx);
@@ -168,6 +177,7 @@ export class Controls {
       this.handX.target = THREE.MathUtils.clamp(this.handX.target + delta.x, -halfX, halfX);
       this.handZ.target = THREE.MathUtils.clamp(this.handZ.target + delta.z, -halfZ, halfZ);
     } else if (drag.kind === "knife") {
+      drag.tiltSign = this.calcTiltSign(drag);
       const maxTilt = this.layout.max_tilt_rad;
       this.tilt.target = THREE.MathUtils.clamp(this.tilt.target + drag.tiltSign * dxPx * TILT_RAD_PER_PX, -maxTilt, maxTilt);
       // Far enough to reach the table at any tilt. The core stops the knife there, and the press cap
@@ -195,12 +205,47 @@ export class Controls {
     return viewHeightM / this.scene.renderer.domElement.clientHeight;
   }
 
-  /** Which way the knife tilts for the handles to follow the mouse rightward. */
-  private calcTiltSign(): number {
-    const handleAbovePivotM = this.layout.blade_back_m + this.layout.handle_len_m - this.knifeLowerM;
-    const pivot = new THREE.Vector3(0, this.layout.pivot_y_m, 0);
-    const handleAt = (tilt: number) => new THREE.Vector3(Math.sin(tilt), Math.cos(tilt), 0).multiplyScalar(handleAbovePivotM).add(pivot);
-    return this.calcScreenDirection(handleAt(this.tilt.value), handleAt(this.tilt.value + PROBE_STEP));
+  private readKnifeFrame(game: Game): void {
+    const frame = game.get_knife_frame();
+    this.knifeEdge.fromArray(frame, 0);
+    this.knifeDown.fromArray(frame, 3);
+  }
+
+  private getPivot(): THREE.Vector3 {
+    return new THREE.Vector3(0, this.layout.pivot_y_m, 0);
+  }
+
+  /** The point of the knife's edge midway along it, where it sits below the pivot. */
+  private getEdgeMiddle(): THREE.Vector3 {
+    return this.getPivot().addScaledVector(this.knifeDown, this.knifeLowerM);
+  }
+
+  /**
+   * A grab of the knife at `point`, remembered in the knife's own frame, which holds still as the
+   * knife floats, lowers, and tilts.
+   */
+  private buildKnifeDrag(point: THREE.Vector3): KnifeDrag {
+    const fromEdgeMiddle = point.clone().sub(this.getEdgeMiddle());
+    const drag: KnifeDrag = {
+      kind: "knife",
+      alongEdgeM: fromEdgeMiddle.dot(this.knifeEdge),
+      aboveEdgeM: -fromEdgeMiddle.dot(this.knifeDown),
+      tiltSign: 1,
+    };
+    drag.tiltSign = this.calcTiltSign(drag);
+    return drag;
+  }
+
+  /**
+   * Which way to tilt the knife, +1 or -1, for the grabbed point to move rightward on screen. A
+   * larger tilt turns the knife's downward direction by -angle about its edge direction.
+   */
+  private calcTiltSign(drag: KnifeDrag): number {
+    const pivot = this.getPivot();
+    const grabbed = this.getEdgeMiddle().addScaledVector(this.knifeEdge, drag.alongEdgeM).addScaledVector(this.knifeDown, -drag.aboveEdgeM);
+    const tilted = grabbed.clone().sub(pivot).applyAxisAngle(this.knifeEdge, -PROBE_STEP).add(pivot);
+    const travelPx = this.toClientPx(tilted).x - this.toClientPx(grabbed).x;
+    return Math.abs(travelPx) < TILT_SIGN_MIN_TRAVEL_PX ? drag.tiltSign : Math.sign(travelPx);
   }
 
   /**
@@ -232,12 +277,6 @@ export class Controls {
     const ndc = point.clone().project(this.scene.camera);
     const rect = this.scene.renderer.domElement.getBoundingClientRect();
     return new THREE.Vector2(rect.left + ((ndc.x + 1) / 2) * rect.width, rect.top + ((1 - ndc.y) / 2) * rect.height);
-  }
-
-  /** +1 where moving from `from` to `to` goes rightward on screen, else -1. */
-  private calcScreenDirection(from: THREE.Vector3, to: THREE.Vector3): number {
-    const camera = this.scene.camera;
-    return to.clone().project(camera).x >= from.clone().project(camera).x ? 1 : -1;
   }
 
   private updateCursor(kind: PickKind | null): void {

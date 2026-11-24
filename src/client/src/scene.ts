@@ -3,8 +3,8 @@ import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { type Game, type Layout, get_blade_outline, get_handle_centers, get_stand_parts } from "@wasm/cake_wasm.js";
 import { Spring } from "./spring";
 
-/** What a click grabbed. The knife's blade and handles differ only in which way its tilt follows the mouse. */
-export type PickKind = "cake" | "blade" | "handle" | "stand";
+/** What a click grabbed: the cake, any part of the knife (blade or handles), or the cake stand. */
+export type PickKind = "cake" | "knife" | "stand";
 
 const SPONGE = 0xe8c07a;
 /** The color of a cake with no texture of its own. */
@@ -319,8 +319,8 @@ export class Scene {
       new THREE.ExtrudeGeometry(shape, { depth: KNIFE_GRIP_THICKNESS_M, bevelEnabled: false }).translate(0, 0, -KNIFE_GRIP_THICKNESS_M / 2),
       new THREE.MeshBasicMaterial({ visible: false }),
     );
-    blade.userData.pick = "blade";
-    grip.userData.pick = "blade";
+    blade.userData.pick = "knife";
+    grip.userData.pick = "knife";
     this.knife.add(blade, grip);
     const centers = get_handle_centers();
     const wood = new THREE.MeshStandardMaterial({ color: 0x5b3a29, roughness: 0.7 });
@@ -329,7 +329,7 @@ export class Scene {
       const mesh = new THREE.Mesh(handle, wood);
       mesh.position.set(centers[i], centers[i + 1], centers[i + 2]);
       mesh.castShadow = true;
-      mesh.userData.pick = "handle";
+      mesh.userData.pick = "knife";
       this.knife.add(mesh);
     }
   }

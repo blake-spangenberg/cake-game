@@ -44,8 +44,9 @@ const CUT_DEPTH_TOLERANCE_M: f64 = 0.005;
 /// How far the resting edge clears the top of the cake as it is posed now, were it standing on
 /// the stand.
 const REST_HEADROOM_M: f64 = 0.05;
-/// How fast the resting knife follows the cake's height as it changes.
-const REST_HALF_LIFE_S: f64 = 0.1;
+/// Half-life of each of the rest's two easing stages, which together cover half of a change in
+/// the cake's height in about 0.5 s.
+const REST_STAGE_HALF_LIFE_S: f64 = 0.2;
 
 /// The knife's cut plane always passes through [`PIVOT`], tilting about the edge's direction.
 /// `lower_m` is how far the edge's lowest point lies below the pivot within the plane. The player
@@ -55,6 +56,9 @@ const REST_HALF_LIFE_S: f64 = 0.1;
 pub struct Knife {
     pub tilt_rad: f64,
     pub rest_m: f64,
+    /// What `rest_m` eases toward, itself easing toward where the knife rests over the cake. The
+    /// two stages start the float smoothly and stop it without passing its target.
+    pub rest_lead_m: f64,
     pub lower_m: f64,
 }
 
@@ -102,11 +106,13 @@ impl Knife {
         PIVOT + self.calc_frame().down * self.lower_m
     }
 
-    /// Eases the rest over `dt_s` toward where it sits over a cake `cake_height_m` tall. The next
-    /// `step` lowers the knife from there.
-    pub(crate) fn float_over(&mut self, cake_height_m: f64, dt_s: f64) {
-        let ease = 1.0 - libm::exp2(-dt_s / REST_HALF_LIFE_S);
-        self.rest_m += (calc_rest_m(cake_height_m) - self.rest_m) * ease;
+    /// Eases the rest over `dt_s` toward where it sits over a cake `cake_height_m` tall, never
+    /// leaving the range between where it was and the targets it has been given. The next `step`
+    /// lowers the knife from there.
+    pub fn float_over(&mut self, cake_height_m: f64, dt_s: f64) {
+        let ease = 1.0 - libm::exp2(-dt_s / REST_STAGE_HALF_LIFE_S);
+        self.rest_lead_m += (calc_rest_m(cake_height_m) - self.rest_lead_m) * ease;
+        self.rest_m += (self.rest_lead_m - self.rest_m) * ease;
     }
 
     /// Rotation from the knife's local frame (x along the edge, y up the blade) to the world.

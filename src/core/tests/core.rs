@@ -1,10 +1,10 @@
 use cake_core::cakes::{CakeError, CakeModel, MAX_HULL_VERTICES, Skin, build_slice_missing_cake};
 use cake_core::cut::{Plane, Split, calc_split};
 use cake_core::input::{HandInput, Input, InputError, KnifeInput, quantize_meters, quantize_radians};
-use cake_core::knife::{Knife, MAX_RIDE_M, START_TILT_RAD, Solid, calc_edge_rise_m};
+use cake_core::knife::{Knife, MAX_RIDE_M, MAX_TILT_RAD, START_TILT_RAD, Solid, calc_edge_rise_m};
 use cake_core::mesh::{Mesh, MeshError};
 use cake_core::replay::{build_placement_inputs, build_scripted_inputs, replay};
-use cake_core::sim::{Phase, ROUND_TICKS, World};
+use cake_core::sim::{Phase, ROUND_TICKS, TICKS_PER_S, World};
 use cake_core::table::{
     CAKE_SPAWN, MAX_CAKE_SIDE_M, PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M,
     TABLE_HALF_X_M, TABLE_HALF_Z_M,
@@ -37,7 +37,8 @@ fn placeholder_cake_is_closed() {
     assert_eq!(build_slice_missing_cake().mesh.validate_closed(), Ok(()));
 }
 
-/// A box resting on y = 0 and centered on the stand, with a matching hull.
+/// A box resting on y = 0 and centered on its own origin, with a matching hull. A world spawns it
+/// at `CAKE_SPAWN`, off the stand.
 fn build_box_cake(half_x_m: f32, height_m: f32, half_z_m: f32) -> CakeModel {
     let mesh = build_box([-half_x_m, 0.0, -half_z_m], [half_x_m, height_m, half_z_m]);
     let hull = mesh.positions.clone();
@@ -179,7 +180,7 @@ fn plane_missing_the_mesh_leaves_it_whole_on_one_side() {
 }
 
 /// An upright knife with its edge on the pivot.
-const UPRIGHT_KNIFE: Knife = Knife { tilt_rad: 0.0, rest_m: 0.0, lower_m: 0.0 };
+const UPRIGHT_KNIFE: Knife = Knife { tilt_rad: 0.0, rest_m: 0.0, rest_lead_m: 0.0, lower_m: 0.0 };
 
 fn calc_limit_m(knife: &Knife, mesh: &Mesh) -> f64 {
     let positions = to_dvec3s(mesh);
@@ -558,26 +559,114 @@ fn extent_bound_is_at_least_the_placeholders_longest_distance_across() {
     assert!(extent_m <= mesh.calc_extent_bound(), "{extent_m} vs {}", mesh.calc_extent_bound());
 }
 
-/// How high the upright knife's edge rests over `model` as it spawns.
-fn calc_resting_edge_y_m(model: CakeModel) -> f64 {
+/// How high the upright knife's edge rests over `model` as it spawns moved by `shift` from where
+/// it usually spawns.
+fn calc_resting_edge_y_m(mut model: CakeModel, shift: DVec3) -> f64 {
+    for p in model.mesh.positions.iter_mut().chain(model.hulls.iter_mut().flatten()) {
+        *p += shift.as_vec3();
+    }
     PIVOT.y - World::create(model, 0.0, None).get_knife().lower_m
 }
 
+/// Moves a cake from where it spawns onto the middle of the stand.
+const ONTO_STAND: DVec3 = DVec3::new(-CAKE_SPAWN.x, STAND_TOP_Y_M, -CAKE_SPAWN.z);
+
 #[test]
 fn knife_rests_5_cm_above_the_top_of_a_cake_on_the_stand_as_it_is_posed() {
-    let flat_y_m = calc_resting_edge_y_m(build_box_cake(0.1, 0.04, 0.1));
+    let flat_y_m = calc_resting_edge_y_m(build_box_cake(0.1, 0.04, 0.1), ONTO_STAND);
     assert!((flat_y_m - 0.21).abs() < 1e-6, "{flat_y_m}");
-    let tall_y_m = calc_resting_edge_y_m(build_box_cake(0.02, 0.2, 0.02));
+    let tall_y_m = calc_resting_edge_y_m(build_box_cake(0.02, 0.2, 0.02), ONTO_STAND);
     assert!((tall_y_m - 0.37).abs() < 1e-6, "{tall_y_m}");
 }
 
+/// The box's flattest pose stands 0.04 m tall and its tallest, on a corner, 0.286 m, so the edge
+/// waits 5 cm above 0.163 m over the stand's top. The tallest pose is found along sampled
+/// directions, hence the millimeter's slack.
 #[test]
-fn resting_knife_backs_away_from_a_held_cake_hanging_on_its_side() {
-    let flat_rest_m = World::create(build_slice_missing_cake(), START_TILT_RAD, None).get_knife().rest_m;
-    let (world, _) = hold_cake_by_its_rim();
+fn knife_waits_over_the_middle_of_a_cakes_flattest_and_tallest_heights_away_from_the_stand() {
+    let edge_y_m = calc_resting_edge_y_m(build_box_cake(0.1, 0.04, 0.1), DVec3::new(-1.1, 0.0, 0.0));
+    assert!((edge_y_m - 0.333).abs() < 1e-3, "{edge_y_m}");
+}
+
+#[test]
+fn resting_knife_floats_halfway_in_half_a_second_and_never_passes_where_it_rests() {
+    let mut knife = UPRIGHT_KNIFE;
+    let mut rests_m = Vec::new();
+    for _ in 0..10 * TICKS_PER_S {
+        knife.float_over(0.1, 1.0 / TICKS_PER_S as f64);
+        rests_m.push(knife.rest_m);
+    }
+    // Over a cake 0.1 m tall on the stand the edge rests 5 cm above it, 0.21 m below the pivot.
+    let rest_m = 0.21;
+    assert!(rests_m[0] < 0.01 * rest_m, "jumped to {}", rests_m[0]);
+    let half_s_m = rests_m[TICKS_PER_S as usize / 2 - 1];
+    assert!((0.45 * rest_m..0.55 * rest_m).contains(&half_s_m), "{half_s_m}");
+    assert!(rests_m.windows(2).all(|pair| pair[0] <= pair[1]), "turned back");
+    assert!(rests_m.iter().all(|&m| m <= rest_m), "passed {rest_m}");
+    assert!((rests_m.last().unwrap() - rest_m).abs() < 1e-6, "{rests_m:?}");
+    assert_eq!(knife.lower_m, 0.0);
+}
+
+/// Hung on its side the placeholder stands much taller than as it spawns, yet away from the stand
+/// the knife keeps waiting where it rested at spawn.
+#[test]
+fn resting_knife_waits_over_a_held_cake_on_its_side_until_it_is_carried_onto_the_stand() {
+    let spawned_rest_m = World::create(build_slice_missing_cake(), START_TILT_RAD, None).get_knife().rest_m;
+    let (mut world, hand) = hold_cake_by_its_rim();
+    let waiting_rest_m = world.get_knife().rest_m;
+    assert!((waiting_rest_m - spawned_rest_m).abs() < 0.005, "{waiting_rest_m} vs {spawned_rest_m}");
+    for _ in 0..3 * TICKS_PER_S {
+        world.step(&Input { hand: Some(HandInput { target_xz: [0, 0], ..hand }), ..Input::default() });
+    }
     let knife = world.get_knife();
-    assert!(knife.rest_m < flat_rest_m - 0.05, "{knife:?} vs {flat_rest_m}");
+    assert!(knife.rest_m < waiting_rest_m - 0.04, "{knife:?} vs {waiting_rest_m}");
     assert_eq!(knife.lower_m, knife.rest_m);
+}
+
+/// How far into the cake the blade's edge would reach were the cake moved just across the
+/// blade's plane, or 0 where it would clear the cake or the cake lies over 2 cm off the plane. A
+/// held cake the blade stops short of its plane counts as in the way too.
+fn calc_blade_overlap_m(world: &World) -> f64 {
+    let (near_blade_m, across_m) = (0.02, 0.002);
+    let knife = world.get_knife();
+    let plane = knife.calc_plane();
+    let positions = world.get_cake_positions();
+    let offsets_m = positions.iter().map(|p| (*p - plane.point).dot(plane.normal));
+    let (low_m, high_m) =
+        offsets_m.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), m| (low.min(m), high.max(m)));
+    let shift_m = if low_m > 0.0 {
+        -low_m - across_m
+    } else if high_m < 0.0 {
+        across_m - high_m
+    } else {
+        0.0
+    };
+    if shift_m.abs() > near_blade_m + across_m {
+        return 0.0;
+    }
+    let shifted: Vec<DVec3> = positions.iter().map(|p| *p + plane.normal * shift_m).collect();
+    let cake = Solid { positions: &shifted, triangles: &world.get_model().mesh.triangles };
+    (knife.lower_m - knife.calc_lower_limit_m(&[cake])).max(0.0)
+}
+
+/// A pole standing at its tallest, picked up by its top, held for 40 ticks, then carried 0.52 m
+/// onto the stand's middle at 1 m/s under a blade tilted toward it. The hardest such carry found
+/// for the rest's approach distance.
+#[test]
+fn resting_knife_rises_clear_of_a_tall_cake_carried_onto_the_stand() {
+    let mut world = World::create(build_box_cake(0.025, 0.25, 0.025), -MAX_TILT_RAD, None);
+    let grab_at = [CAKE_SPAWN.x, 0.25, CAKE_SPAWN.z].map(quantize_meters);
+    let knife = KnifeInput { tilt: quantize_radians(-MAX_TILT_RAD), lower: 0 };
+    let (hold_ticks, carry_ticks) = (40, 31);
+    for tick in 0..5 * TICKS_PER_S as i32 {
+        let progress = (tick - hold_ticks).clamp(0, carry_ticks) as f64 / carry_ticks as f64;
+        let target_xz = [CAKE_SPAWN.x, CAKE_SPAWN.z].map(|m| quantize_meters(m * (1.0 - progress)));
+        world.step(&Input { hand: Some(HandInput { grab_at, target_xz }), knife, stand_angle: 0 });
+        let overlap_m = calc_blade_overlap_m(&world);
+        assert_eq!(overlap_m, 0.0, "the blade reached {overlap_m} m into the cake at tick {tick}");
+    }
+    let translation = world.get_cake_pose().translation;
+    assert!(translation.with_y(0.0).length() < 0.01, "{translation:?}");
 }
 
 /// Grabs the placeholder's bottom tier at its rim away from the stand, which hangs it on its

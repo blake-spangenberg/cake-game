@@ -121,10 +121,16 @@ impl World {
     }
 
     /// Height of the surface beneath the cake: the stand's top where its bounding box reaches over
-    /// the stand, easing down along an S curve to the table's [`STAND_APPROACH_M`] away.
+    /// the stand, easing down to the table's [`STAND_APPROACH_M`] away.
     fn calc_support_y_m(&self) -> f64 {
-        let nearness = (1.0 - self.calc_stand_gap_m() / STAND_APPROACH_M).clamp(0.0, 1.0);
-        STAND_TOP_Y_M * nearness * nearness * (3.0 - 2.0 * nearness)
+        STAND_TOP_Y_M * self.calc_stand_nearness(STAND_APPROACH_M)
+    }
+
+    /// How near the cake's bounding box is to the stand, along an S curve from 0 at `approach_m`
+    /// outside the rim to 1 where it reaches the rim.
+    pub(super) fn calc_stand_nearness(&self, approach_m: f64) -> f64 {
+        let nearness = (1.0 - self.calc_stand_gap_m() / approach_m).clamp(0.0, 1.0);
+        nearness * nearness * (3.0 - 2.0 * nearness)
     }
 
     fn calc_lowest_y_m(&self) -> f64 {
