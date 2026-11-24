@@ -3,7 +3,7 @@
 //! file as its argument, else uses the placeholder.
 
 use cake_core::input::{ANGLE_UNIT_RAD, HandInput, Input, KnifeInput, quantize_radians};
-use cake_core::knife::START_KNIFE;
+use cake_core::knife::START_TILT_RAD;
 use cake_core::replay::calc_spawned_top_grab_at;
 use cake_core::sim::{TICKS_PER_S, World};
 
@@ -18,8 +18,8 @@ const END_TICK: i32 = 800;
 fn main() {
     let model = common::fetch_model();
     let grab_at = calc_spawned_top_grab_at(&model);
-    let start_tilt = quantize_radians(START_KNIFE.tilt_rad);
-    let mut world = World::create(model, START_KNIFE, None);
+    let start_tilt = quantize_radians(START_TILT_RAD);
+    let mut world = World::create(model, START_TILT_RAD, None);
     let mut last = world.get_cake_pose();
     println!("tick holding      x      y      z   speed_m_s  spin_rad_s");
     for tick in 0..END_TICK {

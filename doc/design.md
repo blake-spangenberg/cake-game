@@ -15,7 +15,7 @@ The game is intuitive, since it depicts a scenario that could exist in the real 
 ## Lobby
 - The first player to open the link is the host. If the host leaves, the role passes to another player.
 - Every player types a name before joining. This is the one place the game requires the keyboard.
-- The host picks the round's cake from a picker preset to Random, then presses Start.
+- The host picks the round's cake from a scrollable view of model previews, not a text list, preset to Random, then presses Start.
 - A "How to play" card stays visible so players learn while the lobby fills:
     - Click and drag the cake onto the cake stand
     - Adjust the rotation of the cake stand and the angle of the knife to line up the perfect cut
@@ -28,13 +28,15 @@ The game is intuitive, since it depicts a scenario that could exist in the real 
 ## Fairness
 - All players get the same time, cake, knife, and starting positions. The cut is deterministic given the cake's and knife's poses.
 - Each player has 30 seconds to cut. When time runs out, the game presses `Cut!` for the player, and that cut is judged like any other.
-- The countdown is a pie that slowly loses area. A red numeric timer appears only in the last 10 seconds.
+- The countdown is a pie that slowly loses area. A red numeric timer appears only in the last 10 seconds, ticking audibly on each update. A whistle blows at 0 seconds or when the last player cuts.
 - Controls and measurement are precise enough that there are no ties. Only identical cuts tie, and the earlier cut wins. Players who never touched the controls share their rank.
 
 ## Controls
 - Mouse only: no keyboard input is required during play. Dragging anywhere else swings the camera around the table's center and the wheel zooms. Arrow keys and WASD also swing it, as a second-class option.
 - Prefer diegetic information. Words, numbers, and instructions are a last resort.
-- The knife is a mezzaluna whose cut plane always passes through a fixed point above the cutting region, a cake stand the player sets the cake on. Dragging the knife (blade or either handle) tilts it with the mouse's left/right travel and lowers it toward the cake with up/down travel to check the line. Lowering stops at the cake's surface without pushing it, eases back up when the player lets go, and never cuts. The knife never turns: the player turns the cake stand instead.
+- The knife is a mezzaluna whose cut plane always passes through a fixed point above the cutting region, a cake stand the player sets the cake on. Dragging the knife tilts it with the mouse's left/right travel and lowers it toward the cake with up/down travel to check the line. Dragging the blade rather than a handle reverses the left/right direction. Lowering stops at the cake's surface without pushing it, eases back up when the player lets go, and never cuts. The knife never turns: the player turns the cake stand instead.
+- The knife rests high enough that a player positioning the cake reasonably never hits it by accident: higher for a cake with a larger maximum extent, lower for one closer to a sphere.
+- A cake still on the table can be cut too, but only where the blade actually reaches it.
 - Every control moves relative to where its drag started, eased through springs.
 - A big, obvious `Cut!` button, clearly separated from the other controls, freezes time, physics, and input and cuts at once along the knife's current pose, so a cake still settling is cut as it is at that instant.
 - Tilt is limited to roughly 45-60 degrees from vertical, so every cut still looks like slicing a cake.
@@ -44,7 +46,7 @@ The game is intuitive, since it depicts a scenario that could exist in the real 
     - Dragging it onto the stand keeps that orientation, unless done too violently or caught on the rim, which may turn it
     - Picking it up while on the stand lifts it only enough to slide it across the plate, keeping its orientation
     - Turning the stand adjusts it further. Circling the mouse around the stand turns it the same way for as long as the circling goes on, and it stops when the circling stops
-    - Tilting the knife makes the final adjustment. A lowered knife stops both tilting and turning where it meets the cake or stand rather than jumping clear
+    - Tilting the knife makes the final adjustment. A lowered knife dragged across a bumpy surface (a mitten's knit) rides up over the bumps rather than sticking, up to a maximum lift. Beyond that it stops both tilting and turning where it meets the cake or stand rather than jumping clear
 - The perspective must not mislead: a cut must never be unexpectedly bad because of an illusion of perspective. Players check the knife against the cake from other camera angles and by lowering the knife. Knife and cake cast shadows on the table and on each other as depth cues.
 - A cut is final.
 - The game relies on player entropy to widen the spread of outcomes. The knife and cake start on separate sides of the table, the knife at an unhelpful orientation. The more input distance a cut requires, the more a skilled player can express their advantage.
@@ -83,8 +85,8 @@ The reveal is dramatic, with pomp and circumstance, and is worth a round running
 
 ## World, look, and sound
 - The table floats in an abstract space with no floor or room around it. A cake dropped off it falls for about 3 seconds before it respawns.
-- The knife's metal is shiny and the table shows wood grain.
-- After the cut, the knife stays standing in the parted halves.
+- The knife's metal is shiny and the table shows wood grain. The knife looks like a classic mezzaluna: a broad curved steel blade with two upright, pear-shaped light wooden knobs on steel ferrules at its ends.
+- After the cut, the knife stays standing in the parted halves. The halves part far enough to tell apart at a glance, and each weight is plainly tied to its own half.
 - A chop sound plays for the player's own cut and for opponents' cuts.
 
 ## Stretch goals

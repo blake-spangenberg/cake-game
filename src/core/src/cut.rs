@@ -30,15 +30,6 @@ impl Split {
     }
 }
 
-/// Whether the plane passes between the points, rather than leaving them all on one side.
-pub(crate) fn is_crossing(positions: &[DVec3], plane: &Plane) -> bool {
-    let mut distances = positions.iter().map(|p| (p - plane.point).dot(plane.normal));
-    let Some(first) = distances.next() else {
-        return false;
-    };
-    distances.any(|distance| (distance > 0.0) != (first > 0.0))
-}
-
 /// Divides a closed mesh, given in world coordinates, by a plane. Each triangle is clipped to
 /// each side and the pieces are summed as signed tetrahedra with their apex on the plane, so the
 /// cut face contributes nothing and needs no triangulation.

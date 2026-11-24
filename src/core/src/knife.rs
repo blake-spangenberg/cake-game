@@ -3,7 +3,7 @@ use rapier3d::math::{Rotation, Vec3};
 
 use crate::cut::{Plane, for_each_section_segment};
 use crate::input::{KnifeInput, calc_meters, calc_radians};
-use crate::table::{PIVOT, STAND_RADIUS_M};
+use crate::table::STAND_RADIUS_M;
 
 /// Tilt limit either side of vertical, so every cut still looks like slicing a cake.
 pub const MAX_TILT_RAD: f64 = core::f64::consts::FRAC_PI_4;
@@ -18,8 +18,8 @@ pub const BLADE_THICKNESS_M: f64 = 0.002;
 /// The two upright handles rise from the back's ends.
 pub const HANDLE_RADIUS_M: f64 = 0.014;
 pub const HANDLE_LEN_M: f64 = 0.09;
-/// The pose every round starts in, leaned away from any useful cut.
-pub const START_KNIFE: Knife = Knife { tilt_rad: MAX_TILT_RAD, lower_m: 0.0 };
+/// The tilt every round starts at, leaned away from any useful cut.
+pub const START_TILT_RAD: f64 = MAX_TILT_RAD;
 /// The edge's fixed direction: the cake turns on its stand instead of the knife turning.
 const EDGE: DVec3 = DVec3::Z;
 const BLADE_HULL_SEGMENTS: u32 = 16;
@@ -34,12 +34,21 @@ const SWEEP_MARGIN_RAD: f64 = 0.005;
 /// How far the edge may sink into a solid it rests on and still count as clear, so a cake
 /// settling under a resting knife does not block every turn.
 const TOUCH_TOLERANCE_M: f64 = 0.0005;
+/// How far above the player's lowering a tilt may lift the edge to ride over a bump, such as a
+/// mitten's knit, rather than stick on it. A higher step stops the tilt. The client lets the
+/// player press the knife a few millimeters past where it rests, so the highest bump ridden is
+/// this less those millimeters.
+pub const MAX_RIDE_M: f64 = 0.015;
+/// How far past the cut's stop a cake may reach and still lie in its path, so a cake settled a
+/// hair into the plate it rests on is still cut.
+const CUT_DEPTH_TOLERANCE_M: f64 = 0.005;
 
-/// The knife's cut plane always passes through [`PIVOT`], tilting about the edge's direction.
-/// At rest the edge's lowest point lies on the pivot, and lowering slides it down within its
-/// plane by `lower_m`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// The knife's cut plane always passes through `pivot`, fixed for the round, tilting about the
+/// edge's direction. At rest the edge's lowest point lies on the pivot, and lowering slides it
+/// down within its plane by `lower_m`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Knife {
+    pub pivot: DVec3,
     pub tilt_rad: f64,
     pub lower_m: f64,
 }
@@ -69,12 +78,12 @@ impl Knife {
     }
 
     pub fn calc_plane(&self) -> Plane {
-        Plane { point: PIVOT, normal: self.calc_frame().normal }
+        Plane { point: self.pivot, normal: self.calc_frame().normal }
     }
 
     /// The edge's lowest point, the origin of the knife's local frame.
     pub(crate) fn calc_edge_middle(&self) -> DVec3 {
-        PIVOT + self.calc_frame().down * self.lower_m
+        self.pivot + self.calc_frame().down * self.lower_m
     }
 
     /// Rotation from the knife's local frame (x along the edge, y up the blade) to the world.
@@ -86,14 +95,16 @@ impl Knife {
     }
 
     /// Takes the player's lowering, then tilt, then lowering again at the new tilt. Lowering
-    /// stops where the edge meets a solid, and tilting stops where the lowered edge would enter
-    /// one. The blade never pushes a solid; one rising into it raises it instead.
+    /// stops where the edge meets a solid. Tilting rides the edge up over a bump in a solid, but
+    /// stops where it would have to rise more than [`MAX_RIDE_M`] above the player's lowering.
+    /// The blade never pushes a solid; one rising into it raises it instead.
     pub fn step(&mut self, input: &KnifeInput, solids: &[Solid]) {
         let wanted_lower_m = calc_meters(input.lower).max(0.0);
         self.lower_toward(wanted_lower_m, solids);
+        let ride_lower_m = self.lower_m.min(wanted_lower_m - MAX_RIDE_M);
         let target_tilt_rad = calc_radians(input.tilt).clamp(-MAX_TILT_RAD, MAX_TILT_RAD);
         self.tilt_rad = calc_sweep_reach(self.tilt_rad, target_tilt_rad, |tilt_rad| {
-            Knife { tilt_rad, ..*self }.is_clear_of(solids)
+            Knife { tilt_rad, lower_m: ride_lower_m, ..*self }.is_clear_of(solids)
         });
         self.lower_toward(wanted_lower_m, solids);
     }
@@ -108,15 +119,26 @@ impl Knife {
         self.calc_lower_limit_m(solids) >= self.lower_m - TOUCH_TOLERANCE_M
     }
 
+    /// Whether `point`, on the knife's plane, lies in the cut's path: within the blade's span and
+    /// no deeper than `stop_lower_m`, the lowering where the cut stops. The cut rocks the curved
+    /// edge along its stop, so it reaches that depth across the span, not only at the edge's
+    /// middle.
+    pub(crate) fn is_in_cut_path(&self, point: DVec3, stop_lower_m: f64) -> bool {
+        let frame = self.calc_frame();
+        let along_m = (point - self.pivot).dot(frame.edge);
+        let depth_m = (point - self.pivot).dot(frame.down);
+        along_m.abs() <= BLADE_HALF_SPAN_M && depth_m <= stop_lower_m + CUT_DEPTH_TOLERANCE_M
+    }
+
     /// How far the edge can lower before it touches one of `solids` or the table.
     pub fn calc_lower_limit_m(&self, solids: &[Solid]) -> f64 {
         let frame = self.calc_frame();
-        let table_limit_m = PIVOT.y / -frame.down.y;
-        let plane = Plane { point: PIVOT, normal: frame.normal };
+        let table_limit_m = self.pivot.y / -frame.down.y;
+        let plane = Plane { point: self.pivot, normal: frame.normal };
         let mut limit_m = table_limit_m;
         for solid in solids {
             for_each_section_segment(solid.positions, solid.triangles, &plane, |a, b| {
-                if let Some(depth_m) = calc_segment_depth_under_edge(&frame, a, b) {
+                if let Some(depth_m) = calc_segment_depth_under_edge(self.pivot, &frame, a, b) {
                     limit_m = limit_m.min(depth_m);
                 }
             });
@@ -194,9 +216,9 @@ pub fn calc_handle_centers() -> [Vec3; 2] {
 /// where the segment lies beyond the blade's ends. A point `u` along the edge and `s` down from
 /// the pivot is reached at lowering `s + rise(u)`, convex in `u`, so its least value on the
 /// segment is at the clamped stationary point.
-fn calc_segment_depth_under_edge(frame: &KnifeFrame, a: DVec3, b: DVec3) -> Option<f64> {
-    let (ua, ub) = ((a - PIVOT).dot(frame.edge), (b - PIVOT).dot(frame.edge));
-    let (sa, sb) = ((a - PIVOT).dot(frame.down), (b - PIVOT).dot(frame.down));
+fn calc_segment_depth_under_edge(pivot: DVec3, frame: &KnifeFrame, a: DVec3, b: DVec3) -> Option<f64> {
+    let (ua, ub) = ((a - pivot).dot(frame.edge), (b - pivot).dot(frame.edge));
+    let (sa, sb) = ((a - pivot).dot(frame.down), (b - pivot).dot(frame.down));
     let (u_min, u_max) = (ua.min(ub), ua.max(ub));
     if u_max < -BLADE_HALF_SPAN_M || u_min > BLADE_HALF_SPAN_M {
         return None;

@@ -3,7 +3,8 @@ import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { type Game, type Layout, get_blade_outline, get_handle_centers, get_stand_parts } from "@wasm/cake_wasm.js";
 import { Spring } from "./spring";
 
-export type PickKind = "cake" | "knife" | "stand";
+/** What a click grabbed. The knife's blade and handles differ only in which way its tilt follows the mouse. */
+export type PickKind = "cake" | "blade" | "handle" | "stand";
 
 const SPONGE = 0xe8c07a;
 /** The color of a cake with no texture of its own. */
@@ -32,7 +33,8 @@ export class Scene {
   private readonly cake = new THREE.Group();
   private readonly knife = new THREE.Group();
   private readonly stand = new THREE.Group();
-  private readonly pivot: THREE.Vector3;
+  /** The point every cut plane passes through, fit to each round's cake. */
+  private readonly pivot = new THREE.Vector3();
   private readonly halfGap = new Spring(0, HALF_GAP_HALF_LIFE_S);
   private halves: { group: THREE.Group; cap: THREE.Mesh; clip: THREE.Plane; offset: THREE.Vector3 }[] = [];
   private cakeTexture: THREE.Texture | null = null;
@@ -46,7 +48,6 @@ export class Scene {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.localClippingEnabled = true;
     this.scene.background = new THREE.Color(0x1d1b19);
-    this.pivot = new THREE.Vector3(0, layout.pivot_y_m, 0);
     this.addLights();
     this.addTable();
     this.buildStand();
@@ -65,9 +66,10 @@ export class Scene {
     return null;
   }
 
-  /** Replaces the cake with the game's mesh, whole, once its texture is decoded. */
+  /** Replaces the cake with the game's mesh, whole, once its texture is decoded, and takes the round's pivot. */
   async resetCake(game: Game): Promise<void> {
     const texture = await this.loadCakeTexture(game);
+    this.pivot.set(0, game.get_pivot_y_m(), 0);
     for (const half of this.halves) this.scene.remove(half.group, half.cap);
     this.halves = [];
     this.cake.clear();
@@ -272,6 +274,8 @@ export class Scene {
       new THREE.ExtrudeGeometry(shape, { depth: KNIFE_GRIP_THICKNESS_M, bevelEnabled: false }).translate(0, 0, -KNIFE_GRIP_THICKNESS_M / 2),
       new THREE.MeshBasicMaterial({ visible: false }),
     );
+    blade.userData.pick = "blade";
+    grip.userData.pick = "blade";
     this.knife.add(blade, grip);
     const centers = get_handle_centers();
     const wood = new THREE.MeshStandardMaterial({ color: 0x5b3a29, roughness: 0.7 });
@@ -280,9 +284,9 @@ export class Scene {
       const mesh = new THREE.Mesh(handle, wood);
       mesh.position.set(centers[i], centers[i + 1], centers[i + 2]);
       mesh.castShadow = true;
+      mesh.userData.pick = "handle";
       this.knife.add(mesh);
     }
-    this.knife.userData.pick = "knife";
   }
 }
 

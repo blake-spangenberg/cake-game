@@ -76,6 +76,16 @@ impl Mesh {
     pub fn calc_max_distance_from(&self, point: Vec3) -> f32 {
         self.positions.iter().map(|p| p.distance(point)).fold(0.0, f32::max)
     }
+
+    /// An upper bound on the longest distance across the mesh: the diameter of the smallest sphere
+    /// about its bounding box's center that holds every vertex.
+    pub fn calc_extent_bound(&self) -> f32 {
+        let Some(&first) = self.positions.first() else {
+            return 0.0;
+        };
+        let (min, max) = self.positions.iter().fold((first, first), |(min, max), &p| (min.min(p), max.max(p)));
+        2.0 * self.calc_max_distance_from((min + max) / 2.0)
+    }
 }
 
 /// `point_len` points evenly spaced along a circular arc from `angle0` to `angle1` inclusive,

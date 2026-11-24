@@ -1,12 +1,12 @@
 use cake_core::cakes::{CakeError, CakeModel, MAX_HULL_VERTICES, Skin, build_slice_missing_cake};
 use cake_core::cut::{Plane, Split, calc_split};
 use cake_core::input::{HandInput, Input, InputError, KnifeInput, quantize_meters, quantize_radians};
-use cake_core::knife::{Knife, START_KNIFE, Solid, calc_edge_rise_m};
+use cake_core::knife::{Knife, MAX_RIDE_M, START_TILT_RAD, Solid, calc_edge_rise_m};
 use cake_core::mesh::{Mesh, MeshError};
 use cake_core::replay::{build_placement_inputs, build_scripted_inputs, replay};
 use cake_core::sim::{Phase, ROUND_TICKS, World};
 use cake_core::table::{
-    CAKE_SPAWN, MAX_CAKE_EXTENT_M, PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M,
+    CAKE_SPAWN, MAX_CAKE_EXTENT_M, MAX_PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M,
     TABLE_HALF_X_M, TABLE_HALF_Z_M,
 };
 use rapier3d::glamx::DVec3;
@@ -176,6 +176,9 @@ fn plane_missing_the_mesh_leaves_it_whole_on_one_side() {
     assert!((split.below_m3 - 1.0).abs() < 1e-12, "{split:?}");
 }
 
+/// An upright knife resting over the tallest cake's pivot.
+const UPRIGHT_KNIFE: Knife = Knife { pivot: MAX_PIVOT, tilt_rad: 0.0, lower_m: 0.0 };
+
 fn calc_limit_m(knife: &Knife, mesh: &Mesh) -> f64 {
     let positions = to_dvec3s(mesh);
     knife.calc_lower_limit_m(&[Solid { positions: &positions, triangles: &mesh.triangles }])
@@ -183,21 +186,21 @@ fn calc_limit_m(knife: &Knife, mesh: &Mesh) -> f64 {
 
 #[test]
 fn upright_knife_over_an_empty_table_lowers_to_the_table() {
-    assert!((Knife::default().calc_lower_limit_m(&[]) - PIVOT.y).abs() < 1e-12);
+    assert!((UPRIGHT_KNIFE.calc_lower_limit_m(&[]) - MAX_PIVOT.y).abs() < 1e-12);
 }
 
 #[test]
 fn upright_knife_stops_on_a_box_cake_under_its_edge_middle() {
     let cake = build_box([-0.05, 0.0, -0.01], [0.05, 0.1, 0.01]);
-    let limit_m = calc_limit_m(&Knife::default(), &cake);
-    assert!((limit_m - (PIVOT.y - 0.1)).abs() < 1e-7, "{limit_m}");
+    let limit_m = calc_limit_m(&UPRIGHT_KNIFE, &cake);
+    assert!((limit_m - (MAX_PIVOT.y - 0.1)).abs() < 1e-7, "{limit_m}");
 }
 
 #[test]
 fn curved_edge_reaches_a_box_off_its_middle_later() {
     let cake = build_box([-0.05, 0.0, 0.1], [0.05, 0.1, 0.15]);
-    let limit_m = calc_limit_m(&Knife::default(), &cake);
-    let expected_m = PIVOT.y - 0.1 + calc_edge_rise_m(0.1);
+    let limit_m = calc_limit_m(&UPRIGHT_KNIFE, &cake);
+    let expected_m = MAX_PIVOT.y - 0.1 + calc_edge_rise_m(0.1);
     assert!((limit_m - expected_m).abs() < 1e-7, "{limit_m} vs {expected_m}");
 }
 
@@ -219,12 +222,12 @@ fn curved_edge_meets_a_sloped_top_between_its_corners() {
     let quads = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [3, 7, 6, 2], [0, 4, 7, 3], [1, 2, 6, 5]];
     let cake = Mesh { triangles: quads.iter().flat_map(|&[a, b, c, d]| [[a, b, c], [a, c, d]]).collect(), ..cake };
     assert_eq!(cake.validate_closed(), Ok(()));
-    let limit_m = calc_limit_m(&Knife::default(), &cake);
+    let limit_m = calc_limit_m(&UPRIGHT_KNIFE, &cake);
     let brute_m = (0..=2000)
         .map(|i| {
             let u_m = -0.1 + 0.2 * i as f64 / 2000.0;
             let top_y_m = 0.1 + 0.5 * u_m;
-            PIVOT.y - top_y_m + calc_edge_rise_m(u_m)
+            MAX_PIVOT.y - top_y_m + calc_edge_rise_m(u_m)
         })
         .fold(f64::INFINITY, f64::min);
     assert!((limit_m - brute_m).abs() < 1e-6, "{limit_m} vs {brute_m}");
@@ -233,27 +236,55 @@ fn curved_edge_meets_a_sloped_top_between_its_corners() {
 #[test]
 fn knife_ignores_a_cake_beyond_its_blade_end() {
     let cake = build_box([-0.05, 0.0, 0.3], [0.05, 0.15, 0.4]);
-    let limit_m = calc_limit_m(&Knife::default(), &cake);
-    assert!((limit_m - PIVOT.y).abs() < 1e-12, "{limit_m}");
+    let limit_m = calc_limit_m(&UPRIGHT_KNIFE, &cake);
+    assert!((limit_m - MAX_PIVOT.y).abs() < 1e-12, "{limit_m}");
 }
 
 #[test]
-fn lowered_knife_tilted_into_a_cake_stops_against_it_rather_than_rising() {
+fn lowered_knife_tilted_into_a_cake_wall_rides_up_it_at_most_the_ride_allowance_then_stops() {
     let cake = build_box([-0.15, 0.0, -0.1], [-0.05, 0.2, 0.1]);
     let positions = to_dvec3s(&cake);
     let solids = [Solid { positions: &positions, triangles: &cake.triangles }];
     let lower = quantize_meters(0.3);
-    let mut knife = Knife::default();
+    let mut knife = UPRIGHT_KNIFE;
     knife.step(&KnifeInput { tilt: 0, lower }, &solids);
     assert!((knife.lower_m - 0.3).abs() < 1e-3, "{knife:?}");
-    knife.step(&KnifeInput { tilt: quantize_radians(0.5), lower }, &solids);
-    assert!((knife.lower_m - 0.3).abs() < 1e-3, "{knife:?}");
+    for _ in 0..10 {
+        knife.step(&KnifeInput { tilt: quantize_radians(0.5), lower }, &solids);
+    }
+    assert!(knife.lower_m > 0.3 - MAX_RIDE_M - 1e-3, "{knife:?}");
     assert!((0.1..0.2).contains(&knife.tilt_rad), "{knife:?}");
+}
+
+/// Tilts a knife pressed 5 mm into a flat cake top at y = 0.2 toward a ridge of `ridge_height_m`
+/// across its path, and returns how far it tilted.
+fn tilt_across_a_ridge(ridge_height_m: f32) -> f64 {
+    let slab = build_box([-0.15, 0.0, -0.1], [0.15, 0.2, 0.1]);
+    let ridge = build_box([-0.07, 0.2, -0.1], [-0.06, 0.2 + ridge_height_m, 0.1]);
+    let (slab_positions, ridge_positions) = (to_dvec3s(&slab), to_dvec3s(&ridge));
+    let solids = [
+        Solid { positions: &slab_positions, triangles: &slab.triangles },
+        Solid { positions: &ridge_positions, triangles: &ridge.triangles },
+    ];
+    let lower = quantize_meters(MAX_PIVOT.y - 0.2 + 0.005);
+    let mut knife = UPRIGHT_KNIFE;
+    knife.step(&KnifeInput { tilt: 0, lower }, &solids);
+    for _ in 0..60 {
+        knife.step(&KnifeInput { tilt: quantize_radians(0.6), lower }, &solids);
+    }
+    knife.tilt_rad
+}
+
+#[test]
+fn tilting_knife_rides_over_a_low_bump_but_stops_at_a_high_step() {
+    assert!(tilt_across_a_ridge(0.005) > 0.59, "{}", tilt_across_a_ridge(0.005));
+    let blocked_rad = tilt_across_a_ridge(0.03);
+    assert!((0.1..0.4).contains(&blocked_rad), "{blocked_rad}");
 }
 
 #[test]
 fn knife_rotation_matches_its_frame() {
-    let knife = Knife { tilt_rad: 0.3, lower_m: 0.0 };
+    let knife = Knife { tilt_rad: 0.3, ..UPRIGHT_KNIFE };
     let frame = knife.calc_frame();
     let rotation = knife.calc_rotation().as_dquat();
     assert!((rotation * DVec3::X).distance(frame.edge) < 1e-6);
@@ -289,7 +320,7 @@ fn input_with_unknown_flags_is_rejected() {
 
 #[test]
 fn untouched_round_cuts_itself_at_the_last_tick() {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, Some(ROUND_TICKS));
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, Some(ROUND_TICKS));
     for _ in 0..ROUND_TICKS + 5 {
         world.step(&Input::default());
     }
@@ -299,7 +330,7 @@ fn untouched_round_cuts_itself_at_the_last_tick() {
 
 #[test]
 fn untimed_round_keeps_playing() {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     for _ in 0..ROUND_TICKS + 5 {
         world.step(&Input::default());
     }
@@ -308,13 +339,57 @@ fn untimed_round_keeps_playing() {
 
 #[test]
 fn spawned_cake_is_beside_the_stand_out_of_the_cut() {
-    let world = World::create(build_slice_missing_cake(), Knife::default(), None);
+    let world = World::create(build_slice_missing_cake(), 0.0, None);
     assert!(!world.is_cut_through());
+}
+
+/// A box cake settled on the table where it spawns, shifted along the knife's edge by `shift_z_m`,
+/// with the knife tilted so its plane meets the table through the cake.
+fn settle_box_on_the_table_in_the_knife_plane(shift_z_m: f32) -> World {
+    let mut model = build_box_cake(0.15, 0.1, 0.05);
+    for p in model.mesh.positions.iter_mut().chain(model.hulls.iter_mut().flatten()) {
+        p.z += shift_z_m;
+    }
+    let tilt_rad = -core::f64::consts::FRAC_PI_4;
+    let mut world = World::create(model, tilt_rad, None);
+    let input = Input { knife: KnifeInput { tilt: quantize_radians(tilt_rad), lower: 0 }, ..Input::default() };
+    for _ in 0..60 {
+        world.step(&input);
+    }
+    world
+}
+
+#[test]
+fn cake_on_the_table_under_the_blade_is_cut_through() {
+    let mut world = settle_box_on_the_table_in_the_knife_plane(0.0);
+    assert!(world.is_cut_through());
+    assert!(world.cut().below_m3 > 0.0);
+}
+
+#[test]
+fn cake_beyond_the_blade_end_is_not_cut_though_the_plane_crosses_it() {
+    let mut world = settle_box_on_the_table_in_the_knife_plane(0.15);
+    let plane = world.get_knife().calc_plane();
+    let crossed = calc_split(world.get_cake_positions(), &world.get_model().mesh.triangles, &plane);
+    assert!(crossed.above_m3 > 0.0 && crossed.below_m3 > 0.0, "{crossed:?}");
+    assert!(!world.is_cut_through());
+    assert_eq!(world.cut().calc_score(), 0.0);
+}
+
+#[test]
+fn cake_on_the_stand_under_the_resting_knife_is_cut_through_once_the_edge_enters_it() {
+    let mut world = place_cake_on_stand();
+    for _ in 0..120 {
+        world.step(&Input::default());
+    }
+    assert!(world.is_cut_through());
+    let touch_m = world.calc_cake_touch_lower_m();
+    assert!((0.0..world.calc_cut_lower_m()).contains(&touch_m), "{touch_m}");
 }
 
 /// The scripted round up to the moment the carried cake has been placed on the stand and let go.
 fn place_cake_on_stand() -> World {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     for input in &build_placement_inputs() {
         world.step(input);
     }
@@ -414,7 +489,7 @@ fn held_cake_dragged_through_the_stand_does_not_clip_into_it() {
 
 #[test]
 fn cake_falling_off_the_table_respawns() {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     let grab_at = [CAKE_SPAWN.x + 0.11, 0.035, CAKE_SPAWN.z].map(quantize_meters);
     let edge = [TABLE_HALF_X_M, TABLE_HALF_Z_M].map(quantize_meters);
     let carry = Input { hand: Some(HandInput { grab_at, target_xz: edge }), ..Input::default() };
@@ -429,7 +504,7 @@ fn cake_falling_off_the_table_respawns() {
 
 #[test]
 fn held_cake_dragged_into_the_lowered_knife_is_not_pulled_through_the_blade() {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     let grab_at = [CAKE_SPAWN.x, 0.12, CAKE_SPAWN.z].map(quantize_meters);
     let across = [-0.3, 0.0].map(quantize_meters);
     let knife = KnifeInput { tilt: 0, lower: quantize_meters(0.2) };
@@ -449,10 +524,23 @@ fn placeholder_cake_fits_under_the_resting_knife_in_any_pose() {
     assert!(extent_m as f64 <= MAX_CAKE_EXTENT_M, "{extent_m}");
 }
 
+#[test]
+fn knife_rests_just_above_the_cake_standing_on_its_longest_extent() {
+    let pivot_y_m = |model: CakeModel| World::create(model, START_TILT_RAD, None).get_knife().pivot.y;
+    let cube_m = 0.08_f64;
+    let cube_pivot_y_m = pivot_y_m(build_box_cake(cube_m as f32 / 2.0, cube_m as f32, cube_m as f32 / 2.0));
+    let cube_diagonal_m = cube_m * 3.0_f64.sqrt();
+    assert!(cube_pivot_y_m > STAND_TOP_Y_M + cube_diagonal_m, "{cube_pivot_y_m}");
+    assert!(cube_pivot_y_m < STAND_TOP_Y_M + cube_diagonal_m + 0.03, "{cube_pivot_y_m}");
+    let log_pivot_y_m = pivot_y_m(build_box_cake(0.1, 0.04, 0.02));
+    assert!(log_pivot_y_m > cube_pivot_y_m, "{log_pivot_y_m} vs {cube_pivot_y_m}");
+    assert!(pivot_y_m(build_slice_missing_cake()) <= MAX_PIVOT.y);
+}
+
 /// Grabs the placeholder's bottom tier at its rim away from the stand, which hangs it on its
 /// side, and holds it still above the table for a second.
 fn hold_cake_by_its_rim() -> (World, HandInput) {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     let grab_at = [CAKE_SPAWN.x + 0.11, 0.035, CAKE_SPAWN.z].map(quantize_meters);
     let hand = HandInput { grab_at, target_xz: [grab_at[0], grab_at[2]] };
     for _ in 0..60 {
@@ -488,7 +576,7 @@ fn dropped_cake_comes_to_rest_without_rolling_away() {
 
 #[test]
 fn grab_away_from_the_cake_is_ignored() {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     let start = world.get_cake_pose().translation;
     let input = Input { hand: Some(HandInput { grab_at: [-40_000, 1_000, 0], target_xz: [0, 0] }), ..Input::default() };
     for _ in 0..60 {
@@ -524,7 +612,7 @@ fn stand_parts_stack_from_the_table_to_the_plate_top() {
 
 #[test]
 fn scripted_round_ends_with_the_cake_carried_off_the_stand_and_dropped() {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     for input in &build_scripted_inputs() {
         world.step(input);
     }

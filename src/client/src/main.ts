@@ -34,15 +34,19 @@ const picker = document.querySelector<HTMLSelectElement>("#cake-picker")!;
 const credit = document.querySelector<HTMLDivElement>("#credit")!;
 
 const scene = new Scene(canvas, layout);
-/** The camera orbits halfway between the resting knife's edge and the stand's plate. */
-const orbit = new Orbit(scene.camera, new THREE.Vector3(0, (layout.pivot_y_m + layout.stand_top_y_m) / 2, 0));
+/** The camera orbits halfway between the stand's plate and the knife's edge resting over the tallest cake. */
+const orbit = new Orbit(scene.camera, new THREE.Vector3(0, (layout.max_pivot_y_m + layout.stand_top_y_m) / 2, 0));
 picker.append(new Option("Random", RANDOM_CAKE), ...CAKES.map((cake) => new Option(cake.name, cake.id)));
 const firstCake = pickCake();
 credit.replaceChildren(buildCreditHtml(firstCake));
 let game = new Game(roundTicks, await fetchCakeFile(firstCake));
-const controls = new Controls(scene, orbit, layout, game.get_knife_pose()[0]);
-/** The cut in progress: when it started, the knife's travel, and the result to show once it lands. */
-let cutting: { startMs: number; fromLowerM: number; toLowerM: number; split: Float64Array } | null = null;
+const controls = new Controls(scene, orbit, layout, game);
+/**
+ * The cut in progress: when it started, the knife's travel, the lowering where the edge enters the
+ * cake and the halves split open (none once they have, or for a cut that misses), and the result
+ * to show once it lands.
+ */
+let cutting: { startMs: number; fromLowerM: number; toLowerM: number; splitLowerM: number | null; split: Float64Array } | null = null;
 let lagMs = 0;
 let lastFrameMs = performance.now();
 let nextFrameMs = lastFrameMs;
@@ -60,15 +64,16 @@ async function startRound(): Promise<void> {
   credit.replaceChildren(buildCreditHtml(cake));
   game.free();
   game = new Game(roundTicks, file);
-  controls.reset(game.get_knife_pose()[0]);
+  controls.reset(game);
   await scene.resetCake(game);
   cutting = null;
   result.hidden = true;
 }
 
 function startCut(split: Float64Array, nowMs: number): void {
-  cutting = { startMs: nowMs, fromLowerM: game.get_knife_pose()[1], toLowerM: game.calc_cut_lower_m(), split };
-  scene.showHalves(game);
+  const toLowerM = game.calc_cut_lower_m();
+  const splitLowerM = game.is_cut_through() ? Math.min(game.calc_cake_touch_lower_m(), toLowerM) : null;
+  cutting = { startMs: nowMs, fromLowerM: game.get_knife_pose()[1], toLowerM, splitLowerM, split };
 }
 
 /**
@@ -92,6 +97,10 @@ function animateCut(nowMs: number): void {
   const rock = THREE.MathUtils.clamp((elapsedS - CUT_DESCEND_S) / CUT_ROCK_S, 0, rockEnd);
   const lowerM = cut.fromLowerM + (cut.toLowerM - cut.fromLowerM) * descend * descend;
   scene.placeKnife(game, lowerM, calcRockRad(rock));
+  if (cut.splitLowerM !== null && lowerM >= cut.splitLowerM) {
+    scene.showHalves(game);
+    cut.splitLowerM = null;
+  }
   if (rock < rockEnd || !result.hidden) return;
   scene.partHalves();
   const [above, below, points] = cut.split;

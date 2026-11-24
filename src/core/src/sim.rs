@@ -5,10 +5,10 @@ use rapier3d::glamx::DVec3;
 use rapier3d::prelude::*;
 
 use crate::cakes::CakeModel;
-use crate::cut::{Split, calc_split, is_crossing};
+use crate::cut::{Split, calc_split, for_each_section_segment};
 use crate::input::{Input, KnifeInput, calc_radians};
 use crate::knife::{Knife, Solid, calc_sweep_reach};
-use crate::table::{CAKE_SPAWN, RESPAWN_BELOW_Y_M};
+use crate::table::{CAKE_SPAWN, RESPAWN_BELOW_Y_M, calc_pivot};
 use hand::Grip;
 use setup::{StandPlate, build_cake_shape, insert_cake, insert_knife, insert_stand, insert_table};
 
@@ -65,8 +65,11 @@ pub struct World {
 }
 
 impl World {
-    /// A world that cuts itself at `round_ticks`, or never with `None`.
-    pub fn create(model: CakeModel, knife: Knife, round_ticks: Option<u32>) -> World {
+    /// A world whose knife rests at `knife_tilt_rad` over a pivot fit to the cake, and that cuts
+    /// itself at `round_ticks`, or never with `None`.
+    pub fn create(model: CakeModel, knife_tilt_rad: f64, round_ticks: Option<u32>) -> World {
+        let pivot = calc_pivot(model.mesh.calc_extent_bound() as f64);
+        let knife = Knife { pivot, tilt_rad: knife_tilt_rad, lower_m: 0.0 };
         let mut physics = PhysicsWorld::new();
         physics.integration_parameters.dt = DT_S as f32;
         physics.integration_parameters.length_unit = LENGTH_UNIT_M;
@@ -126,18 +129,40 @@ impl World {
             return split;
         }
         let split = calc_split(&self.cake_positions, &self.model.mesh.triangles, &self.knife.calc_plane());
+        let split = if self.is_cut_through() {
+            split
+        } else {
+            Split { above_m3: split.above_m3 + split.below_m3, below_m3: 0.0 }
+        };
         self.phase = Phase::Cut { tick: self.tick, split };
         split
     }
 
-    /// Whether a cut now would divide the cake rather than miss it.
+    /// Whether a cut now would divide the cake: its plane crosses the cake, and the blade sweeps
+    /// through the whole crossing, rather than stopping on the stand above it or ending beside
+    /// it.
     pub fn is_cut_through(&self) -> bool {
-        is_crossing(&self.cake_positions, &self.knife.calc_plane())
+        let stop_lower_m = self.calc_cut_lower_m();
+        let mut is_crossed = false;
+        let mut is_reached = true;
+        let plane = self.knife.calc_plane();
+        for_each_section_segment(&self.cake_positions, &self.model.mesh.triangles, &plane, |a, b| {
+            is_crossed = true;
+            is_reached &= self.knife.is_in_cut_path(a, stop_lower_m) && self.knife.is_in_cut_path(b, stop_lower_m);
+        });
+        is_crossed && is_reached
     }
 
     /// How far the knife would lower through the cake to the stand or table, for drawing the cut.
     pub fn calc_cut_lower_m(&self) -> f64 {
         self.knife.calc_lower_limit_m(&[self.stand_plate.as_solid()])
+    }
+
+    /// How far the knife lowers before its edge meets the cake, for keeping the halves together
+    /// until the blade enters it.
+    pub fn calc_cake_touch_lower_m(&self) -> f64 {
+        let cake = Solid { positions: &self.cake_positions, triangles: &self.model.mesh.triangles };
+        self.knife.calc_lower_limit_m(&[cake])
     }
 
     pub fn get_phase(&self) -> Phase {

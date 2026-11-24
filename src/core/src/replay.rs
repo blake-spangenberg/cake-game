@@ -4,7 +4,7 @@ use rapier3d::glamx::DVec3;
 
 use crate::cakes::{CakeModel, build_slice_missing_cake};
 use crate::input::{HandInput, Input, KnifeInput, quantize_meters, quantize_radians};
-use crate::knife::START_KNIFE;
+use crate::knife::START_TILT_RAD;
 use crate::sim::{Phase, World};
 use crate::table::CAKE_SPAWN;
 
@@ -30,7 +30,7 @@ pub fn build_scripted_inputs() -> Vec<Input> {
     let last = inputs[PLACE_AND_TURN_TICKS - 1];
     let raised = Input { knife: KnifeInput { lower: 0, ..last.knife }, ..last };
     inputs.extend([raised; RAISE_KNIFE_TICKS]);
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     for input in &inputs {
         world.step(input);
     }
@@ -45,7 +45,7 @@ pub fn build_scripted_inputs() -> Vec<Input> {
 
 fn build_place_and_turn_inputs(tick_len: usize) -> Vec<Input> {
     let grab_at = calc_spawned_top_grab_at(&build_slice_missing_cake());
-    let start_tilt = quantize_radians(START_KNIFE.tilt_rad);
+    let start_tilt = quantize_radians(START_TILT_RAD);
     (0..tick_len)
         .map(|tick| {
             let tick = tick as i32;
@@ -65,7 +65,7 @@ pub fn calc_spawned_top_grab_at(model: &CakeModel) -> [i32; 3] {
 /// Replays `inputs` on a fresh world, returning its hash every [`CHECKPOINT_INTERVAL_TICKS`],
 /// then the bits of the cut's two volumes when cut at the end.
 pub fn replay(inputs: &[Input]) -> Vec<u64> {
-    let mut world = World::create(build_slice_missing_cake(), START_KNIFE, None);
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     let mut checkpoints = Vec::new();
     for (idx, input) in inputs.iter().enumerate() {
         world.step(input);

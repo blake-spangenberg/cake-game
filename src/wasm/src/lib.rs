@@ -4,12 +4,12 @@ use cake_core::cakes::{CakeModel, Skin};
 use cake_core::input::Input;
 use cake_core::knife::{
     BLADE_ARC_RADIUS_M, BLADE_BACK_M, BLADE_HALF_SPAN_M, BLADE_THICKNESS_M, HANDLE_LEN_M, HANDLE_RADIUS_M,
-    MAX_TILT_RAD, START_KNIFE, calc_blade_outline, calc_handle_centers,
+    MAX_TILT_RAD, START_TILT_RAD, calc_blade_outline, calc_handle_centers,
 };
 use cake_core::replay::{build_scripted_inputs, replay};
 use cake_core::sim::{Phase, ROUND_TICKS, TICKS_PER_S, World};
 use cake_core::table::{
-    PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M, TABLE_HALF_X_M, TABLE_HALF_Z_M,
+    MAX_PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M, TABLE_HALF_X_M, TABLE_HALF_Z_M,
 };
 use cake_core::{cut::DENSITY_G_PER_M3, cut::Split, input};
 use wasm_bindgen::prelude::*;
@@ -29,7 +29,8 @@ pub struct Layout {
     pub stand_radius_m: f64,
     pub stand_top_y_m: f64,
     pub stand_plate_thickness_m: f64,
-    pub pivot_y_m: f64,
+    /// The pivot's height for the tallest cake, which bounds every round's.
+    pub max_pivot_y_m: f64,
     pub blade_arc_radius_m: f64,
     pub blade_half_span_m: f64,
     pub blade_back_m: f64,
@@ -52,7 +53,7 @@ pub fn get_layout() -> Layout {
         stand_radius_m: STAND_RADIUS_M,
         stand_top_y_m: STAND_TOP_Y_M,
         stand_plate_thickness_m: STAND_PLATE_THICKNESS_M,
-        pivot_y_m: PIVOT.y,
+        max_pivot_y_m: MAX_PIVOT.y,
         blade_arc_radius_m: BLADE_ARC_RADIUS_M,
         blade_half_span_m: BLADE_HALF_SPAN_M,
         blade_back_m: BLADE_BACK_M,
@@ -99,7 +100,7 @@ impl Game {
     #[wasm_bindgen(constructor)]
     pub fn new(round_ticks: Option<u32>, cake_file: &[u8]) -> Result<Game, JsError> {
         let model = CakeModel::decode(cake_file).map_err(|error| JsError::new(&format!("cake file: {error:?}")))?;
-        Ok(Game { world: World::create(model, START_KNIFE, round_ticks) })
+        Ok(Game { world: World::create(model, START_TILT_RAD, round_ticks) })
     }
 
     /// Advances one tick with an input in the core's wire format.
@@ -132,6 +133,11 @@ impl Game {
         self.world.calc_cut_lower_m()
     }
 
+    /// How far the knife lowers before its edge meets the cake, in meters.
+    pub fn calc_cake_touch_lower_m(&self) -> f64 {
+        self.world.calc_cake_touch_lower_m()
+    }
+
     pub fn get_tick(&self) -> u32 {
         self.world.get_tick()
     }
@@ -153,6 +159,12 @@ impl Game {
     /// Whether the knife stopped the stand short of its input last tick.
     pub fn is_stand_blocked(&self) -> bool {
         self.world.is_stand_blocked()
+    }
+
+    /// The height of the point every cut plane passes through this round, where the knife's edge
+    /// rests, in meters.
+    pub fn get_pivot_y_m(&self) -> f64 {
+        self.world.get_knife().pivot.y
     }
 
     /// Tilt in radians, then lowering in meters.

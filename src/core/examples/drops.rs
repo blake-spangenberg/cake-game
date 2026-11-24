@@ -4,7 +4,7 @@
 //! placeholder.
 
 use cake_core::input::{HandInput, Input, KnifeInput, quantize_meters};
-use cake_core::knife::START_KNIFE;
+use cake_core::knife::START_TILT_RAD;
 use cake_core::sim::{TICKS_PER_S, World};
 use cake_core::table::CAKE_SPAWN;
 
@@ -27,7 +27,7 @@ fn main() {
         let grab_at = grab.map(|m| quantize_meters(m as f64));
         let target_xz = [grab_at[0], grab_at[2]];
         let knife = KnifeInput { tilt: 0, lower: 0 };
-        let mut world = World::create(model.clone(), START_KNIFE, None);
+        let mut world = World::create(model.clone(), START_TILT_RAD, None);
         for _ in 0..HOLD_TICKS {
             world.step(&Input { hand: Some(HandInput { grab_at, target_xz }), knife, stand_angle: 0 });
         }
