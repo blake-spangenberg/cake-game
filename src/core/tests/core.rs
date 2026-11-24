@@ -570,6 +570,9 @@ fn calc_resting_edge_y_m(mut model: CakeModel, shift: DVec3) -> f64 {
 
 /// Moves a cake from where it spawns onto the middle of the stand.
 const ONTO_STAND: DVec3 = DVec3::new(-CAKE_SPAWN.x, STAND_TOP_Y_M, -CAKE_SPAWN.z);
+/// Moves a cake up to 0.2 m across from where it spawns to the table's corner farthest from the
+/// stand, where it is away from the stand.
+const TO_FAR_CORNER: DVec3 = DVec3::new(TABLE_HALF_X_M - 0.1 - CAKE_SPAWN.x, 0.0, TABLE_HALF_Z_M - 0.1 - CAKE_SPAWN.z);
 
 #[test]
 fn knife_rests_5_cm_above_the_top_of_a_cake_on_the_stand_as_it_is_posed() {
@@ -584,12 +587,12 @@ fn knife_rests_5_cm_above_the_top_of_a_cake_on_the_stand_as_it_is_posed() {
 /// directions, hence the millimeter's slack.
 #[test]
 fn knife_waits_over_the_middle_of_a_cakes_flattest_and_tallest_heights_away_from_the_stand() {
-    let edge_y_m = calc_resting_edge_y_m(build_box_cake(0.1, 0.04, 0.1), DVec3::new(-1.1, 0.0, 0.0));
+    let edge_y_m = calc_resting_edge_y_m(build_box_cake(0.1, 0.04, 0.1), TO_FAR_CORNER);
     assert!((edge_y_m - 0.333).abs() < 1e-3, "{edge_y_m}");
 }
 
 #[test]
-fn resting_knife_floats_halfway_in_half_a_second_and_never_passes_where_it_rests() {
+fn resting_knife_floats_halfway_in_0_7_s_and_never_passes_where_it_rests() {
     let mut knife = UPRIGHT_KNIFE;
     let mut rests_m = Vec::new();
     for _ in 0..10 * TICKS_PER_S {
@@ -599,22 +602,27 @@ fn resting_knife_floats_halfway_in_half_a_second_and_never_passes_where_it_rests
     // Over a cake 0.1 m tall on the stand the edge rests 5 cm above it, 0.21 m below the pivot.
     let rest_m = 0.21;
     assert!(rests_m[0] < 0.01 * rest_m, "jumped to {}", rests_m[0]);
-    let half_s_m = rests_m[TICKS_PER_S as usize / 2 - 1];
-    assert!((0.45 * rest_m..0.55 * rest_m).contains(&half_s_m), "{half_s_m}");
+    let at_0_7_s_m = rests_m[TICKS_PER_S as usize * 7 / 10 - 1];
+    assert!((0.45 * rest_m..0.55 * rest_m).contains(&at_0_7_s_m), "{at_0_7_s_m}");
     assert!(rests_m.windows(2).all(|pair| pair[0] <= pair[1]), "turned back");
     assert!(rests_m.iter().all(|&m| m <= rest_m), "passed {rest_m}");
     assert!((rests_m.last().unwrap() - rest_m).abs() < 1e-6, "{rests_m:?}");
     assert_eq!(knife.lower_m, 0.0);
 }
 
-/// Hung on its side the placeholder stands much taller than as it spawns, yet away from the stand
-/// the knife keeps waiting where it rested at spawn.
+/// Hung on its side the placeholder stands much taller than lying flat, yet carried to the table's
+/// far corner the knife waits where it rests over the cake lying flat there.
 #[test]
 fn resting_knife_waits_over_a_held_cake_on_its_side_until_it_is_carried_onto_the_stand() {
-    let spawned_rest_m = World::create(build_slice_missing_cake(), START_TILT_RAD, None).get_knife().rest_m;
+    let flat_edge_y_m = calc_resting_edge_y_m(build_slice_missing_cake(), TO_FAR_CORNER);
     let (mut world, hand) = hold_cake_by_its_rim();
+    let far_corner_xz = [TABLE_HALF_X_M, TABLE_HALF_Z_M].map(quantize_meters);
+    for _ in 0..3 * TICKS_PER_S {
+        world.step(&Input { hand: Some(HandInput { target_xz: far_corner_xz, ..hand }), ..Input::default() });
+    }
     let waiting_rest_m = world.get_knife().rest_m;
-    assert!((waiting_rest_m - spawned_rest_m).abs() < 0.005, "{waiting_rest_m} vs {spawned_rest_m}");
+    let waiting_edge_y_m = PIVOT.y - waiting_rest_m;
+    assert!((waiting_edge_y_m - flat_edge_y_m).abs() < 0.005, "{waiting_edge_y_m} vs {flat_edge_y_m}");
     for _ in 0..3 * TICKS_PER_S {
         world.step(&Input { hand: Some(HandInput { target_xz: [0, 0], ..hand }), ..Input::default() });
     }
@@ -650,8 +658,8 @@ fn calc_blade_overlap_m(world: &World) -> f64 {
 }
 
 /// A pole standing at its tallest, picked up by its top, held for 40 ticks, then carried 0.52 m
-/// onto the stand's middle at 1 m/s under a blade tilted toward it. The hardest such carry found
-/// for the rest's approach distance.
+/// from where it spawns onto the stand's middle at 1 m/s under a blade tilted toward it. The
+/// rest's approach distance clears it, and a narrower one of 0.35 m does not.
 #[test]
 fn resting_knife_rises_clear_of_a_tall_cake_carried_onto_the_stand() {
     let mut world = World::create(build_box_cake(0.025, 0.25, 0.025), -MAX_TILT_RAD, None);

@@ -31,10 +31,13 @@ const CAKE_FRICTION: f32 = 0.9;
 /// while tipping over still outpaces it.
 const ROLL_RESISTANCE_RAD_PER_S2: f32 = 80.0;
 /// Across this gap between the cake's bounding box and the stand's rim, the resting knife turns
-/// from waiting over the cake's middle height to following its height as posed. The slow float
-/// needs this much warning to rise clear of a cake carried in at its tallest at up to the hand's
-/// full speed, with the blade tilted toward it; at 0.15 m such a cake meets the blade.
-const REST_APPROACH_M: f64 = 0.25;
+/// from waiting over the cake's middle height to following its height as posed. It reaches past
+/// where the cake spawns, so the knife there already partly follows, and leaves only the table's
+/// far ends and corners away. No gap the table allows lets the slow float rise clear of a cake
+/// carried in at its tallest at the hand's full speed. This one clears such a carry at up to
+/// about 0.5 m/s from anywhere on the table, and at 1 m/s from where the cake spawns, which at
+/// 0.35 m meets the blade.
+const REST_APPROACH_M: f64 = 0.4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Phase {

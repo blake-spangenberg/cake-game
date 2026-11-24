@@ -9,9 +9,9 @@ use crate::table::{PIVOT, STAND_RADIUS_M, STAND_TOP_Y_M};
 pub const MAX_TILT_RAD: f64 = core::f64::consts::FRAC_PI_4;
 /// The mezzaluna's edge is an arc of this radius, lowest at its middle.
 pub const BLADE_ARC_RADIUS_M: f64 = 0.4;
-/// How far the edge reaches either side of its middle, past the stand's rim so the blade spans
-/// the cutting region at every pose.
-pub const BLADE_HALF_SPAN_M: f64 = STAND_RADIUS_M + 0.04;
+/// How far the edge reaches either side of its middle: to the stand's rim, which still spans the
+/// cutting region at every pose, since every cut plane passes over the stand's center.
+pub const BLADE_HALF_SPAN_M: f64 = STAND_RADIUS_M;
 /// Height of the blade's straight back above the edge's lowest point.
 pub const BLADE_BACK_M: f64 = 0.1;
 pub const BLADE_THICKNESS_M: f64 = 0.002;
@@ -45,8 +45,8 @@ const CUT_DEPTH_TOLERANCE_M: f64 = 0.005;
 /// the stand.
 const REST_HEADROOM_M: f64 = 0.05;
 /// Half-life of each of the rest's two easing stages, which together cover half of a change in
-/// the cake's height in about 0.5 s.
-const REST_STAGE_HALF_LIFE_S: f64 = 0.2;
+/// the cake's height in about 0.7 s.
+const REST_STAGE_HALF_LIFE_S: f64 = 0.286;
 
 /// The knife's cut plane always passes through [`PIVOT`], tilting about the edge's direction.
 /// `lower_m` is how far the edge's lowest point lies below the pivot within the plane. The player

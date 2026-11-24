@@ -17,7 +17,7 @@ export interface CakeEntry {
 /** Order: the owner's favorites, then those that passed with reservations, then new candidates not yet reviewed. */
 export const CAKES: readonly CakeEntry[] = [
   { id: "ccc3f77d27f94ae5acc77992b90b146b", name: "Leather Sofa", author: "gla_bot", license: "CC BY 4.0" },
-  { id: "ecd6448e6dae4b93b60008913bdf8554", name: "Potato", author: "Tony.Richards", license: "CC BY 4.0" },
+  { id: "ecd6448e6dae4b93b60008913bdf8554", name: "Heritage Potato", author: "Tony.Richards", license: "CC BY 4.0" },
   { id: "3c889b5ee6b64a2aafb9b8977f8a8219", name: "Turkey Leg", author: "BillieBones", license: "CC BY 4.0" },
   { id: "79b95e7cf3dc422e814598b0eea6c83f", name: "Knitted Mitten", author: "nebulousflynn", license: "CC BY 4.0" },
   { id: "89b7408463b144d0bd157cc788dd496d", name: "Yellow Sneaker", author: "mr.pinoux", license: "CC BY 4.0" },
@@ -30,15 +30,15 @@ export const CAKES: readonly CakeEntry[] = [
   { id: "53fdf984962948128db5f4ccfcae0843", name: "Old Pear", author: "inciprocal.com", license: "CC BY 4.0" },
   { id: "143e23a0436449f686ea0dd947e6f634", name: "Croissant", author: "rozza3d", license: "CC BY 4.0", repair: ["--fill-unlit-underside"] },
   { id: "a00d2eaa0c1d459f893ae4cbb08b866e", name: "Boxing Glove", author: "urheilumuseo", license: "CC BY 4.0" },
-  { id: "b400281a14bf4f3a87bc6a053a19581a", name: "Scarecrow", author: "edemaistre", license: "CC BY 4.0" },
+  { id: "b400281a14bf4f3a87bc6a053a19581a", name: "Garden Scarecrow", author: "edemaistre", license: "CC BY 4.0" },
   { id: "e4b7d4137f444265ad98fb02780ccc5e", name: "Garden Gnome", author: "tiozombi", license: "CC BY 4.0" },
-  { id: "ec9c0ac738fd4495af334ea2092e8d89", name: "Raven", author: "WirtualneMuzeaMalopolski", license: "CC0 1.0" },
-  { id: "c5fad940863f47f784d792ca95e16b42", name: "Tuna", author: "dhjwdwd", license: "CC BY 4.0", repair: ["--turn", "z", "90"] },
+  { id: "ec9c0ac738fd4495af334ea2092e8d89", name: "Common Raven", author: "WirtualneMuzeaMalopolski", license: "CC0 1.0" },
+  { id: "c5fad940863f47f784d792ca95e16b42", name: "Tuna Fish", author: "dhjwdwd", license: "CC BY 4.0", repair: ["--turn", "z", "90"] },
   { id: "daeadd913644438aa3096bb357a02016", name: "Electric Guitar", author: "abazibiz", license: "CC BY 4.0", repair: ["--hull-open-pieces"] },
   { id: "4ce9e8dbeb74425eb215e4168807dcb5", name: "Grand Piano", author: "richterbelmont26", license: "CC BY 4.0" },
+  { id: "165d500fb0274a8e88a5bdc12df65492", name: "Classic Piano", author: "kozhokar_kate", license: "CC BY 4.0", repair: ["--hull-open-pieces"] },
   { id: "c65a00ca4a174653beb4c59cb42b9143", name: "Mossy Log", author: "julianmalik", license: "CC BY 4.0" },
   { id: "fc6e731a0131471ba8e45511c7ea9996", name: "Marble Bust", author: "WirtualneMuzeaMalopolski", license: "CC0 1.0" },
-  { id: "165d500fb0274a8e88a5bdc12df65492", name: "Classic Piano", author: "kozhokar_kate", license: "CC BY 4.0", repair: ["--hull-open-pieces"] },
 ];
 
 /** The license deeds a credit links to, by the name it shows. */
