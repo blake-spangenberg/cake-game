@@ -1,9 +1,18 @@
-use cake_core::cakes::{CakeError, CakeModel, MAX_HULL_VERTICES, Skin, build_slice_missing_cake};
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::similar_names,
+    clippy::unwrap_used,
+    reason = "test fixtures cast small literals, and x and z name the axes"
+)]
+
+use cake_core::cakes::{CREASE_RAD, CakeError, CakeModel, MAX_HULL_VERTICES, Skin, build_slice_missing_cake};
 use cake_core::cut::{Plane, Split, calc_split};
-use cake_core::input::{HandInput, Input, InputError, KnifeInput, quantize_meters, quantize_radians};
+use cake_core::input::{HandInput, Input, InputError, KnifeInput, POSITION_UNIT_M, quantize_meters, quantize_radians};
 use cake_core::knife::{Knife, MAX_RIDE_M, MAX_TILT_RAD, START_TILT_RAD, Solid, calc_edge_rise_m};
-use cake_core::mesh::{Mesh, MeshError};
-use cake_core::replay::{build_placement_inputs, build_scripted_inputs, replay};
+use cake_core::mesh::{CornerNormals, CornerNormalsError, Mesh, MeshError};
+use cake_core::replay::{build_placement_inputs, build_scripted_inputs, calc_spawned_top_grab_at, replay};
 use cake_core::sim::{Phase, ROUND_TICKS, TICKS_PER_S, World};
 use cake_core::table::{
     CAKE_SPAWN, MAX_CAKE_SIDE_M, PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M,
@@ -66,7 +75,51 @@ fn placeholder_cake_is_closed() {
 fn build_box_cake(half_x_m: f32, height_m: f32, half_z_m: f32) -> CakeModel {
     let mesh = build_box([-half_x_m, 0.0, -half_z_m], [half_x_m, height_m, half_z_m]);
     let hull = mesh.positions.clone();
-    CakeModel { mesh, skin: Skin::Plain, hulls: vec![hull] }
+    build_plain_cake(mesh, vec![hull])
+}
+
+fn build_plain_cake(mesh: Mesh, hulls: Vec<Vec<Vec3>>) -> CakeModel {
+    let corner_normals = CornerNormals::calc(&mesh, CREASE_RAD).unwrap();
+    CakeModel { mesh, skin: Skin::Plain, corner_normals, hulls }
+}
+
+#[test]
+fn corner_normals_expand_to_the_computed_ones_but_for_rounding() {
+    for mesh in [build_box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]), build_slice_missing_cake().mesh] {
+        let computed = mesh.calc_corner_normals(CREASE_RAD);
+        let corner_normals = CornerNormals::calc(&mesh, CREASE_RAD).unwrap();
+        let expanded = corner_normals.to_corners(&mesh);
+        assert_eq!(expanded.len(), computed.len());
+        for (a, b) in expanded.iter().zip(&computed) {
+            assert!(a.as_dvec3().angle_between(b.as_dvec3()) < 1e-4, "{a:?} strays from {b:?}");
+        }
+        assert!(corner_normals.normals.len() < computed.len(), "each distinct normal at a vertex is kept once");
+    }
+}
+
+#[test]
+fn a_triangle_with_no_area_has_no_corner_normals() {
+    let mut mesh = build_box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    mesh.positions.push(mesh.positions[0]);
+    mesh.triangles.push([0, 8, 1]);
+    assert_eq!(CornerNormals::calc(&mesh, CREASE_RAD), Err(CornerNormalsError::Degenerate { triangle_idx: 12 }));
+}
+
+#[test]
+fn a_box_keeps_three_normals_at_each_corner() {
+    let mesh = build_box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    assert_eq!(CornerNormals::calc(&mesh, CREASE_RAD).unwrap().normals.len(), 3 * mesh.positions.len());
+}
+
+#[test]
+fn corner_normals_that_do_not_fit_the_mesh_are_refused() {
+    let mut model = build_box_cake(0.05, 0.05, 0.05);
+    model.corner_normals.normals.pop();
+    assert_eq!(CakeModel::decode(&model.encode()), Err(CakeError::BadNormals));
+    let mut model = build_box_cake(0.05, 0.05, 0.05);
+    // A box corner has three normals, so a fourth pick names one past its own.
+    model.corner_normals.picks[0][0] = 3;
+    assert_eq!(model.validate(), Err(CakeError::BadNormals));
 }
 
 #[test]
@@ -86,7 +139,7 @@ fn cake_file_rejects_damaged_bytes() {
     assert_eq!(CakeModel::decode(&bytes[..bytes.len() - 1]), Err(CakeError::BadFile));
     assert_eq!(CakeModel::decode(&[bytes.as_slice(), &[0]].concat()), Err(CakeError::BadFile));
     assert_eq!(CakeModel::decode(&bytes[1..]), Err(CakeError::BadFile));
-    let mut wrong_version = bytes.clone();
+    let mut wrong_version = bytes;
     wrong_version[4] ^= 1;
     assert_eq!(CakeModel::decode(&wrong_version), Err(CakeError::BadFile));
 }
@@ -107,6 +160,7 @@ fn cake_file_keeps_its_texture_and_needs_a_uv_triple_per_triangle() {
 fn cake_file_rejects_an_unplayable_model() {
     let mut model = build_box_cake(0.05, 0.05, 0.05);
     model.mesh.triangles.pop();
+    model.corner_normals.picks.pop();
     assert!(matches!(CakeModel::decode(&model.encode()), Err(CakeError::Mesh(MeshError::OpenEdge { .. }))));
 }
 
@@ -137,7 +191,7 @@ fn validate_accepts_a_box_and_names_what_is_wrong_otherwise() {
     flat_hull.hulls[0] = vec![Vec3::ZERO; 4];
     assert_eq!(flat_hull.validate(), Err(CakeError::BadHull { hull_idx: 0 }));
     let mut fine_hull = build_box_cake(0.05, 0.05, 0.05);
-    fine_hull.hulls[0] = (0..MAX_HULL_VERTICES as u32 + 1)
+    fine_hull.hulls[0] = (0..=(MAX_HULL_VERTICES as u32))
         .map(|i| {
             let angle = i as f32 * 0.3;
             Vec3::new(0.05 * angle.cos(), 0.05 + 0.01 * (i % 2) as f32, 0.05 * angle.sin())
@@ -252,7 +306,7 @@ fn curved_edge_meets_a_sloped_top_between_its_corners() {
     let limit_m = calc_limit_m(&UPRIGHT_KNIFE, &cake);
     let brute_m = (0..=2000)
         .map(|i| {
-            let u_m = -0.1 + 0.2 * i as f64 / 2000.0;
+            let u_m = -0.1 + 0.2 * f64::from(i) / 2000.0;
             let top_y_m = 0.1 + 0.5 * u_m;
             PIVOT.y - top_y_m + calc_edge_rise_m(u_m)
         })
@@ -457,7 +511,7 @@ fn carried_cake_is_placed_on_the_stand_and_let_go() {
     let pose = world.get_cake_pose();
     assert!(pose.translation.x.abs() < 0.08, "{pose:?}");
     assert!(pose.translation.z.abs() < 0.08, "{pose:?}");
-    assert!((pose.translation.y as f64 - STAND_TOP_Y_M).abs() < 0.01, "{pose:?}");
+    assert!((f64::from(pose.translation.y) - STAND_TOP_Y_M).abs() < 0.01, "{pose:?}");
 }
 
 #[test]
@@ -469,8 +523,80 @@ fn turning_stand_carries_the_cake_around() {
     for _ in 0..60 {
         world.step(&Input { stand_angle: quarter_turn, ..last_placement_input });
     }
-    let turned_rad = world.get_cake_pose().rotation.angle_between(before) as f64;
+    let turned_rad = f64::from(world.get_cake_pose().rotation.angle_between(before));
     assert!((turned_rad - core::f64::consts::FRAC_PI_2).abs() < 0.1, "{turned_rad}");
+}
+
+#[test]
+fn cake_riding_the_stand_keeps_its_distance_from_the_axis_through_eight_quarter_turns() {
+    let mut world = place_cake_on_stand();
+    for _ in 0..120 {
+        world.step(&Input::default());
+    }
+    let off_axis_m = |world: &World| world.get_cake_pose().translation.with_y(0.0).length();
+    let before_m = off_axis_m(&world);
+    for quarter_idx in 1..=8 {
+        let stand_angle = quantize_radians(f64::from(quarter_idx) * core::f64::consts::FRAC_PI_2);
+        for _ in 0..60 {
+            world.step(&Input { stand_angle, ..Input::default() });
+        }
+    }
+    let after_m = off_axis_m(&world);
+    assert!((after_m - before_m).abs() < 0.001, "{before_m} m off the axis became {after_m} m");
+}
+
+/// The placeholder carried by its top until it hangs 22 cm from the stand's axis, half over the
+/// rim, and let go, so it lands leaning against the rim.
+#[test]
+fn cake_let_go_leaning_on_the_stands_rim_comes_to_rest_within_3_s() {
+    let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
+    let grab_at = calc_spawned_top_grab_at(&build_slice_missing_cake());
+    let [grab_x, _, grab_z] = grab_at.map(|unit| f64::from(unit) * POSITION_UNIT_M);
+    for tick in 0..300 {
+        let progress = f64::from(tick.min(150)) / 150.0;
+        let target_xz = [grab_x + (0.22 - grab_x) * progress, grab_z * (1.0 - progress)].map(quantize_meters);
+        world.step(&Input { hand: Some(HandInput { grab_at, target_xz }), ..Input::default() });
+    }
+    for _ in 0..3 * TICKS_PER_S {
+        world.step(&Input::default());
+    }
+    let rested = world.get_cake_pose();
+    let lean_rad = (rested.rotation * Vec3::Y).angle_between(Vec3::Y);
+    assert!((0.5..0.7).contains(&lean_rad), "it lies leaning {lean_rad} rad rather than against the rim");
+    for _ in 0..TICKS_PER_S {
+        world.step(&Input::default());
+    }
+    assert_eq!(world.get_cake_pose(), rested);
+}
+
+/// A square box cake `2 * half_m` across and `height_m` tall, set down on its bottom edge at
+/// x = `half_m` leaning `past_balance_rad` past balance toward +x, then moved by `shift`, with how far
+/// it leans from upright.
+fn build_leaning_box_cake(half_m: f32, height_m: f32, past_balance_rad: f32, shift: Vec3) -> (CakeModel, f32) {
+    let mut model = build_box_cake(half_m, height_m, half_m);
+    let lean_rad = half_m.atan2(height_m / 2.0) + past_balance_rad;
+    let lean = Rotation::from_rotation_z(-lean_rad);
+    let edge = Vec3::new(half_m, 0.0, 0.0);
+    for p in model.mesh.positions.iter_mut().chain(model.hulls.iter_mut().flatten()) {
+        *p = lean * (*p - edge) + edge + shift;
+    }
+    (model, lean_rad)
+}
+
+/// A box 6 cm wide and 10 cm tall set down on one bottom edge, leaning 4 mrad past balance, so the
+/// rolling resistance holds it to a creep that speeds up as it leans further. Nearer balance the
+/// creep stays under Rapier's own sleep threshold and the box rests balanced, as a soft cake may.
+#[test]
+fn box_set_down_just_past_balance_on_an_edge_tips_onto_its_side_rather_than_freezing() {
+    let (model, start_lean_rad) = build_leaning_box_cake(0.03, 0.1, 0.004, Vec3::ZERO);
+    let mut world = World::create(model, START_TILT_RAD, None);
+    for _ in 0..5 * TICKS_PER_S {
+        world.step(&Input::default());
+    }
+    // From the release, lying on its side is a further quarter turn less the lean it started with.
+    let turned_rad = world.get_cake_pose().rotation.angle_between(Rotation::IDENTITY);
+    let on_its_side_rad = core::f32::consts::FRAC_PI_2 - start_lean_rad;
+    assert!((turned_rad - on_its_side_rad).abs() < 0.05, "it turned {turned_rad} rad, not {on_its_side_rad}");
 }
 
 #[test]
@@ -491,7 +617,7 @@ fn cake_grabbed_on_the_stand_by_its_rim_lifts_barely_and_keeps_its_orientation()
     assert!(lowest_y_m - STAND_TOP_Y_M < 0.02, "{lowest_y_m}");
     let slide_m = 0.05;
     for tick in 1..=60 {
-        let target_x = grab_at[0] - quantize_meters(slide_m * tick as f64 / 60.0);
+        let target_x = grab_at[0] - quantize_meters(slide_m * f64::from(tick) / 60.0);
         world.step(&Input { hand: Some(HandInput { target_xz: [target_x, grab_at[2]], ..hand }), ..Input::default() });
     }
     for _ in 0..120 {
@@ -524,6 +650,83 @@ fn turning_the_stand_stops_where_the_cake_meets_the_lowered_knife() {
     }
     assert!(was_blocked);
     assert!(world.get_stand_angle_rad() < 2.0, "{}", world.get_stand_angle_rad());
+}
+
+/// A 6 cm box on the stand 10 cm off its middle, straddling the plane of an upright knife pressed
+/// down onto it, is turned at full speed out from under the blade, which drops to the plate, and
+/// on round into the blade's other side.
+#[test]
+fn stand_turned_into_a_lowered_blade_stops_at_the_cake_and_the_knife_never_climbs_onto_it() {
+    let onto_stand = Vec3::new(-CAKE_SPAWN.x as f32, STAND_TOP_Y_M as f32, -0.1 - CAKE_SPAWN.z as f32);
+    let mut world = settle_shifted_cake(build_box_cake(0.03, 0.06, 0.03), onto_stand, 0.0);
+    let press = KnifeInput { tilt: 0, lower: quantize_meters(0.3) };
+    for _ in 0..120 {
+        world.step(&Input { knife: press, ..Input::default() });
+    }
+    let mut deepest_lower_m = world.get_knife().lower_m;
+    let half_turn = Input { knife: press, stand_angle: quantize_radians(core::f64::consts::PI), ..Input::default() };
+    for _ in 0..300 {
+        world.step(&half_turn);
+        let lower_m = world.get_knife().lower_m;
+        assert!(lower_m > deepest_lower_m - 1e-3, "the knife rose to {lower_m} from {deepest_lower_m}");
+        deepest_lower_m = deepest_lower_m.max(lower_m);
+    }
+    assert!(world.is_stand_blocked());
+    // The corner at (-0.03, -0.07) reaches the plane x = 0 after a turn of pi - atan(3 / 7), and the
+    // stand stops 5 milliradians short of it.
+    let contact_rad = core::f64::consts::PI - libm::atan(0.03 / 0.07);
+    let stopped_rad = world.get_stand_angle_rad();
+    assert!((stopped_rad - (contact_rad - 0.005)).abs() < 0.002, "{stopped_rad} vs contact at {contact_rad}");
+}
+
+/// A box 6 cm wide and 12 cm tall standing on the stand 8 cm from the plane of an upright knife
+/// pressed down to the plate, set down leaning 0.2 rad past balance toward the blade, so it tips
+/// over into it. Its far top corner meets the plane 9 cm above the plate, below the blade's back,
+/// and lying down it would reach 4 cm past the plane.
+#[test]
+fn cake_tipping_into_a_pressed_blade_rests_against_it_until_the_knife_rises_and_the_knife_never_climbs_onto_it() {
+    let onto_stand = Vec3::new(-0.11 - CAKE_SPAWN.x as f32, STAND_TOP_Y_M as f32, -CAKE_SPAWN.z as f32);
+    let (model, start_lean_rad) = build_leaning_box_cake(0.03, 0.12, 0.2, onto_stand);
+    let mut world = World::create(model, 0.0, None);
+    let press = Input { knife: KnifeInput { tilt: 0, lower: quantize_meters(0.3) }, ..Input::default() };
+    world.step(&press);
+    let pressed_lower_m = world.get_knife().lower_m;
+    for _ in 0..2 * TICKS_PER_S {
+        world.step(&press);
+        let lower_m = world.get_knife().lower_m;
+        assert!(lower_m > pressed_lower_m - 1e-3, "the knife rose to {lower_m} from {pressed_lower_m}");
+    }
+    let crossing_m = world.get_cake_positions().iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+    assert!(crossing_m < 0.0, "the box reaches {crossing_m} m past the blade's plane");
+    for _ in 0..2 * TICKS_PER_S {
+        world.step(&Input::default());
+    }
+    let turned_rad = world.get_cake_pose().rotation.angle_between(Rotation::IDENTITY);
+    let on_its_side_rad = core::f32::consts::FRAC_PI_2 - start_lean_rad;
+    assert!((turned_rad - on_its_side_rad).abs() < 0.05, "it turned {turned_rad} rad, not {on_its_side_rad}");
+}
+
+/// How deep the cake's deepest vertex lies inside the stand's plate, column, or base.
+fn calc_stand_depth_m(world: &World) -> f64 {
+    let depths = world.get_cake_positions().iter().flat_map(|p| {
+        STAND_PARTS.map(|part| (part.radius_m - p.with_y(0.0).length()).min(p.y - part.y0_m).min(part.y1_m - p.y))
+    });
+    depths.fold(0.0, f64::max)
+}
+
+/// A box 8 cm across and 5 cm tall, short enough to fit under the stand's plate, grabbed by a top
+/// corner and carried at full speed from where it spawns to past the stand's far side.
+#[test]
+fn short_cake_carried_low_at_the_stand_rises_over_the_plate_rather_than_slipping_under_it() {
+    let model = build_box_cake(0.04, 0.05, 0.04);
+    let grab_at = calc_spawned_top_grab_at(&model);
+    let mut world = World::create(model, START_TILT_RAD, None);
+    let across = [-0.3, 0.0].map(quantize_meters);
+    for tick in 0..120 {
+        world.step(&Input { hand: Some(HandInput { grab_at, target_xz: across }), ..Input::default() });
+        let depth_m = calc_stand_depth_m(&world);
+        assert!(depth_m < 0.002, "at tick {tick} a corner sank {depth_m} m into the stand");
+    }
 }
 
 #[test]
@@ -624,7 +827,7 @@ fn resting_knife_floats_halfway_in_0_7_s_and_never_passes_where_it_rests() {
     let mut knife = UPRIGHT_KNIFE;
     let mut rests_m = Vec::new();
     for _ in 0..10 * TICKS_PER_S {
-        knife.float_over(0.1, 1.0 / TICKS_PER_S as f64);
+        knife.float_over(0.1, 1.0 / f64::from(TICKS_PER_S));
         rests_m.push(knife.rest_m);
     }
     // Over a cake 0.1 m tall on the stand the edge rests 5 cm above it, 0.21 m below the pivot.
@@ -694,7 +897,7 @@ fn resting_knife_rises_clear_of_a_tall_cake_carried_onto_the_stand() {
     let knife = KnifeInput { tilt: quantize_radians(-MAX_TILT_RAD), lower: 0 };
     let (hold_ticks, carry_ticks) = (40, 26);
     for tick in 0..5 * TICKS_PER_S as i32 {
-        let progress = (tick - hold_ticks).clamp(0, carry_ticks) as f64 / carry_ticks as f64;
+        let progress = f64::from((tick - hold_ticks).clamp(0, carry_ticks)) / f64::from(carry_ticks);
         let target_xz = [CAKE_SPAWN.x, CAKE_SPAWN.z].map(|m| quantize_meters(m * (1.0 - progress)));
         world.step(&Input { hand: Some(HandInput { grab_at, target_xz }), knife, stand_angle: 0 });
         let overlap_m = calc_blade_overlap_m(&world);
@@ -763,13 +966,13 @@ fn settled_lopsided_cake_grabbed_at_its_far_light_end_is_carried() {
     let triangles =
         bar.triangles.iter().copied().chain(block.triangles.iter().map(|t| t.map(|i| i + offset))).collect();
     let mesh = Mesh { positions: [bar.positions, block.positions].concat(), triangles };
-    let mut world = World::create(CakeModel { mesh, skin: Skin::Plain, hulls }, START_TILT_RAD, None);
+    let mut world = World::create(build_plain_cake(mesh, hulls), START_TILT_RAD, None);
     for _ in 0..60 {
         world.step(&Input::default());
     }
     let tip = world.get_cake_pose().transform_point(Vec3::new(-0.115, 0.01, 0.0));
     let start = world.get_cake_pose().translation;
-    let grab_at = [tip.x, tip.y, tip.z].map(|m| quantize_meters(m as f64));
+    let grab_at = [tip.x, tip.y, tip.z].map(|m| quantize_meters(f64::from(m)));
     let input = Input { hand: Some(HandInput { grab_at, target_xz: [0, 0] }), ..Input::default() };
     for _ in 0..60 {
         world.step(&input);
@@ -786,10 +989,10 @@ fn replaying_the_same_inputs_gives_the_same_hashes() {
 
 #[test]
 fn quantizing_rounds_to_the_nearest_unit() {
-    assert_eq!(quantize_meters(0.123456), 12_346);
-    assert_eq!(quantize_meters(-0.000014), -1);
+    assert_eq!(quantize_meters(0.123_456), 12_346);
+    assert_eq!(quantize_meters(-0.000_014), -1);
     assert_eq!(quantize_radians(1.0), 100_000);
-    assert_eq!(quantize_radians(-0.000004), 0);
+    assert_eq!(quantize_radians(-0.000_004), 0);
 }
 
 #[test]

@@ -49,8 +49,9 @@ enum Children {
 type Bounds = (Vec3, Vec3);
 
 impl TriangleTree {
-    pub fn build(positions: &[Vec3], triangles: &[[u32; 3]]) -> TriangleTree {
-        let mut tree = TriangleTree { nodes: Vec::new(), triangle_idxs: Vec::new() };
+    #[must_use]
+    pub fn build(positions: &[Vec3], triangles: &[[u32; 3]]) -> Self {
+        let mut tree = Self { nodes: Vec::new(), triangle_idxs: Vec::new() };
         let triangle_bounds: Vec<Bounds> = triangles
             .iter()
             .map(|triangle| {
@@ -65,10 +66,12 @@ impl TriangleTree {
         let mut keys: Vec<u64> = triangle_bounds
             .iter()
             .enumerate()
-            .map(|(idx, &bounds)| ((calc_morton_code(bounds, mesh_bounds) as u64) << 32) | idx as u64)
+            .map(|(idx, &bounds)| (u64::from(calc_morton_code(bounds, mesh_bounds)) << 32) | idx as u64)
             .collect();
         keys.sort_unstable();
-        tree.triangle_idxs = keys.into_iter().map(|key| key as u32).collect();
+        #[expect(clippy::cast_possible_truncation, reason = "the index is the key's low 32 bits")]
+        let triangle_idxs = keys.into_iter().map(|key| key as u32).collect();
+        tree.triangle_idxs = triangle_idxs;
         // Halving leaves every leaf below the root at least two triangles, so no more nodes than
         // triangles.
         tree.nodes.reserve_exact(triangles.len());
@@ -184,13 +187,14 @@ impl TriangleTree {
 
     /// Pushes the node over `triangle_idxs[start..end]` and, depth first, those below it, each
     /// branch halving its triangles in their Morton order. Returns the node's bounds.
+    #[expect(clippy::cast_possible_truncation, reason = "a mesh's triangle count fits its u32 indices")]
     fn push_node(&mut self, triangle_bounds: &[Bounds], start: usize, end: usize) -> Bounds {
         let node_idx = self.nodes.len();
         let leaf = Children::Leaf { start: start as u32, end: end as u32 };
         self.nodes.push(Node { center: DVec3::ZERO, half_extent: DVec3::ZERO, children: leaf });
         let (min, max) = if end - start <= MAX_LEAF_LEN {
             let idxs = &self.triangle_idxs[start..end];
-            calc_union(idxs.iter().map(|&idx| triangle_bounds[idx as usize])).unwrap()
+            calc_union(idxs.iter().map(|&idx| triangle_bounds[idx as usize])).expect("a node holds triangles")
         } else {
             let middle = start + (end - start) / 2;
             let first = self.push_node(triangle_bounds, start, middle);
@@ -213,6 +217,7 @@ fn calc_union(mut boxes: impl Iterator<Item = Bounds>) -> Option<Bounds> {
 
 /// The Morton code of the box's center within `mesh_bounds`: its grid cell's coordinates with
 /// their bits interleaved, so boxes near one another mostly get codes near one another.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a coordinate clamped to the grid")]
 fn calc_morton_code((min, max): Bounds, (mesh_min, mesh_max): Bounds) -> u32 {
     let extent = (mesh_max - mesh_min).max(Vec3::splat(f32::MIN_POSITIVE));
     let cell = ((min + max) / 2.0 - mesh_min) / extent * MORTON_MAX_CELL;
@@ -221,7 +226,7 @@ fn calc_morton_code((min, max): Bounds, (mesh_min, mesh_max): Bounds) -> u32 {
 }
 
 /// The low 10 bits of `value` spread to every third bit.
-fn spread_bits(value: u32) -> u32 {
+const fn spread_bits(value: u32) -> u32 {
     let mut bits = value & 0x3ff;
     bits = (bits | (bits << 16)) & 0x0300_00ff;
     bits = (bits | (bits << 8)) & 0x0300_f00f;

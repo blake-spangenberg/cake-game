@@ -1,16 +1,18 @@
 //! Builds the bodies and colliders of a fresh world.
+#![expect(clippy::cast_possible_truncation, reason = "hands the core's f64 layout to Rapier, which works in f32")]
 
 use std::sync::Arc;
 
 use rapier3d::glamx::DVec3;
 use rapier3d::prelude::*;
 
+use super::mass::calc_mass_properties;
 use super::{CAKE_FRICTION, FREE_ANGULAR_DAMPING, FREE_LINEAR_DAMPING};
 use crate::cakes::CakeModel;
 use crate::cut::DENSITY_G_PER_M3;
 use crate::knife::{HANDLE_LEN_M, HANDLE_RADIUS_M, Knife, Solid, build_blade_hull, calc_handle_centers};
 use crate::mesh::{Mesh, calc_arc_outline};
-use crate::table::{CAKE_SPAWN, STAND_PARTS, TABLE_HALF_X_M, TABLE_HALF_Z_M};
+use crate::table::{CAKE_SPAWN, STAND_PARTS, STAND_RADIUS_M, TABLE_HALF_X_M, TABLE_HALF_Z_M};
 use crate::triangle_tree::TriangleTree;
 
 const STAND_SEGMENTS: u32 = 48;
@@ -29,30 +31,33 @@ pub struct Cake {
 }
 
 impl Cake {
-    /// Panics on a degenerate hull, which [`CakeModel::validate`] rejects.
-    pub fn build(model: CakeModel) -> Cake {
+    /// # Panics
+    /// On a degenerate hull, which [`CakeModel::validate`] rejects.
+    #[must_use]
+    pub fn build(model: CakeModel) -> Self {
         let mesh = &model.mesh;
         let tree = TriangleTree::build(&mesh.positions, &mesh.triangles);
         let width_range_m = mesh.calc_width_range_m(Some(&tree));
         let density_kg_per_m3 = (DENSITY_G_PER_M3 / 1000.0) as f32;
-        let mass = MassProperties::from_trimesh(density_kg_per_m3, &mesh.positions, &mesh.triangles);
+        let mass = calc_mass_properties(density_kg_per_m3, &mesh.positions, &mesh.triangles);
         let hull_shapes: Vec<SharedShape> = model
             .hulls
             .iter()
             .map(|hull| SharedShape::convex_hull(hull).expect("a cake's hulls are not degenerate"))
             .collect();
         let shape = SharedShape::compound(hull_shapes.iter().map(|hull| (Pose::IDENTITY, hull.clone())).collect());
-        Cake { model, tree, width_range_m, mass, hull_shapes, shape }
+        Self { model, tree, width_range_m, mass, hull_shapes, shape }
     }
 
-    pub fn get_model(&self) -> &CakeModel {
+    #[must_use]
+    pub const fn get_model(&self) -> &CakeModel {
         &self.model
     }
 }
 
 impl From<CakeModel> for Arc<Cake> {
-    fn from(model: CakeModel) -> Arc<Cake> {
-        Arc::new(Cake::build(model))
+    fn from(model: CakeModel) -> Self {
+        Self::new(Cake::build(model))
     }
 }
 
@@ -64,7 +69,8 @@ pub(super) struct StandPlate {
 }
 
 impl StandPlate {
-    pub(super) fn build() -> StandPlate {
+    #[expect(clippy::cast_precision_loss, reason = "a segment count far below f32's whole-number range")]
+    pub(super) fn build() -> Self {
         let plate = STAND_PARTS[0];
         let outline = calc_arc_outline(
             [0.0, 0.0],
@@ -75,7 +81,7 @@ impl StandPlate {
         );
         let mut mesh = Mesh::default();
         mesh.push_prism(&outline, plate.y0_m as f32, plate.y1_m as f32);
-        StandPlate { positions: mesh.positions.iter().map(|p| p.as_dvec3()).collect(), triangles: mesh.triangles }
+        Self { positions: mesh.positions.iter().map(|p| p.as_dvec3()).collect(), triangles: mesh.triangles }
     }
 
     pub(super) fn as_solid(&self) -> Solid<'_> {
@@ -91,17 +97,28 @@ pub(super) fn insert_table(physics: &mut PhysicsWorld) {
     );
 }
 
-/// The stand's plate, column, and base as one kinematic body turning about the vertical axis.
+/// The stand's plate, column, and base as one fixed body. They are round, so the physics need not
+/// turn them: the world carries a cake riding the stand round instead.
 pub(super) fn insert_stand(physics: &mut PhysicsWorld) -> RigidBodyHandle {
-    let stand = physics.insert_body(RigidBodyBuilder::kinematic_position_based());
+    let stand = physics.insert_body(RigidBodyBuilder::fixed());
     for part in STAND_PARTS {
-        let half_height_m = ((part.y1_m - part.y0_m) / 2.0) as f32;
-        let collider = ColliderBuilder::cylinder(half_height_m, part.radius_m as f32)
-            .translation(Vector::new(0.0, (part.y0_m as f32) + half_height_m, 0.0))
-            .friction(1.0);
-        physics.insert_collider(collider, Some(stand));
+        physics.insert_collider(build_stand_cylinder(part.radius_m, part.y0_m, part.y1_m), Some(stand));
     }
     stand
+}
+
+/// The space under the stand's plate filled in as one solid cylinder, disabled until a cake is
+/// held, so a carried cake swinging low cannot slip in under the plate and along the column.
+pub(super) fn insert_under_plate_fill(physics: &mut PhysicsWorld, stand: RigidBodyHandle) -> ColliderHandle {
+    let fill = build_stand_cylinder(STAND_RADIUS_M, 0.0, STAND_PARTS[0].y0_m).enabled(false);
+    physics.insert_collider(fill, Some(stand))
+}
+
+fn build_stand_cylinder(radius_m: f64, y0_m: f64, y1_m: f64) -> ColliderBuilder {
+    let half_height_m = ((y1_m - y0_m) / 2.0) as f32;
+    ColliderBuilder::cylinder(half_height_m, radius_m as f32)
+        .translation(Vector::new(0.0, (y0_m as f32) + half_height_m, 0.0))
+        .friction(1.0)
 }
 
 pub(super) fn insert_cake(physics: &mut PhysicsWorld, shared: &Cake) -> RigidBodyHandle {
@@ -132,8 +149,7 @@ pub(super) fn insert_knife(physics: &mut PhysicsWorld, knife: &Knife) -> (RigidB
     let handles = calc_handle_centers().map(|center| {
         ColliderBuilder::cylinder((HANDLE_LEN_M / 2.0) as f32, HANDLE_RADIUS_M as f32).translation(center)
     });
-    let colliders = [blade]
-        .into_iter()
+    let colliders = std::iter::once(blade)
         .chain(handles)
         .map(|collider| physics.insert_collider(collider.enabled(false), Some(body)))
         .collect();

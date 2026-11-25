@@ -3,8 +3,12 @@ use core::f32::consts::TAU;
 use rapier3d::math::Vec3;
 use rapier3d::prelude::SharedShape;
 
-use crate::mesh::{Mesh, MeshError, calc_arc_outline};
+use crate::mesh::{CornerNormals, Mesh, MeshError, calc_arc_outline};
 use crate::table::{MAX_CAKE_EXTENT_M, MAX_CAKE_SIDE_M, STAND_RADIUS_M};
+
+/// Neighboring faces meeting at a sharper angle than this keep a hard edge in a cake's corner
+/// normals; gentler ones shade smoothly.
+pub const CREASE_RAD: f32 = core::f32::consts::FRAC_PI_3;
 
 /// A cake's render mesh, how its surface is drawn, and the convex pieces its collider is built
 /// from, in its local frame with the serving side down at y = 0.
@@ -13,11 +17,14 @@ pub struct CakeModel {
     pub mesh: Mesh,
     /// Drawing only: weight and collision ignore it.
     pub skin: Skin,
+    /// The mesh's shading normals at [`CREASE_RAD`], baked so the client need not compute them.
+    /// Drawing only: weight and collision ignore them.
+    pub corner_normals: CornerNormals,
     pub hulls: Vec<Vec<Vec3>>,
 }
 
 /// How a cake's surface is drawn.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Skin {
     /// One frosting color, for a cake with no sourced coloring.
     Plain,
@@ -39,13 +46,15 @@ pub const MAX_HULL_VERTICES: usize = 32;
 const BOUNDS_SLACK_M: f32 = 1e-4;
 
 const FILE_MAGIC: [u8; 4] = *b"CAKE";
-const FILE_VERSION: u32 = 3;
+const FILE_VERSION: u32 = 5;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum CakeError {
     Mesh(MeshError),
     /// The textured model does not have one UV triple per triangle, or has no image.
     BadSkin,
+    /// The corner normals do not fit the mesh ([`CornerNormals::is_valid_for`]).
+    BadNormals,
     /// The mesh is wound inside out, or encloses no volume.
     NotOutward,
     /// The model's bounding box is longer than [`MAX_CAKE_SIDE_M`] along an axis, or its extent
@@ -71,7 +80,11 @@ const HULL_SEGMENTS_PER_TURN: f32 = 16.0;
 impl CakeModel {
     /// Accepts the model only if the game can play it: a closed, outward-wound mesh, textured with
     /// a UV triple per triangle if at all, that rests on y = 0, fits the stand's plate and the
-    /// extent limit, with coarse, solid hulls.
+    /// extent limit, with coarse, solid hulls and corner normals that fit the mesh.
+    ///
+    /// # Errors
+    /// The first [`CakeError`] the model fails, checked in that order.
+    #[expect(clippy::cast_possible_truncation, reason = "the mesh is f32 while the table's bounds are f64")]
     pub fn validate(&self) -> Result<(), CakeError> {
         self.mesh.validate_closed().map_err(CakeError::Mesh)?;
         if let Skin::Textured { corner_uvs, image } = &self.skin
@@ -101,34 +114,51 @@ impl CakeModel {
                 return Err(CakeError::BadHull { hull_idx });
             }
         }
+        if !self.corner_normals.is_valid_for(&self.mesh) {
+            return Err(CakeError::BadNormals);
+        }
         Ok(())
     }
 
-    /// The model as a baked cake file: little-endian, a magic and version, the counts and the
-    /// image's byte length (0 for a plain skin), then the mesh's positions, each hull's vertices,
-    /// the triangles, and for a textured skin the corner UVs and the image.
+    /// The model as a baked cake file: little-endian, a magic and version, the counts, the image's
+    /// byte length (0 for a plain skin), and the count of distinct corner normals, then the mesh's
+    /// positions, each hull's vertices, the triangles, for a textured skin the corner UVs and the
+    /// image, then the corner normals as `u16` pairs and each corner's pick of them as a byte.
+    #[expect(clippy::cast_possible_truncation, reason = "the file's counts are u32, as the mesh's indices are")]
     pub fn encode(&self) -> Vec<u8> {
         let (corner_uvs, image): (&[[[u16; 2]; 3]], &[u8]) = match &self.skin {
             Skin::Plain => (&[], &[]),
             Skin::Textured { corner_uvs, image } => (corner_uvs, image),
         };
-        let lens = [self.mesh.positions.len(), self.mesh.triangles.len(), self.hulls.len(), image.len()];
-        let header = [FILE_VERSION]
-            .into_iter()
+        let normals = &self.corner_normals;
+        let lens = [
+            self.mesh.positions.len(),
+            self.mesh.triangles.len(),
+            self.hulls.len(),
+            image.len(),
+            normals.normals.len(),
+        ];
+        let header = std::iter::once(FILE_VERSION)
             .chain(lens.map(|len| len as u32))
             .chain(self.hulls.iter().map(|h| h.len() as u32));
         let points = self.mesh.positions.iter().chain(self.hulls.iter().flatten());
         let mut bytes = FILE_MAGIC.to_vec();
         bytes.extend(header.flat_map(u32::to_le_bytes));
-        bytes.extend(points.flat_map(|p| p.to_array()).flat_map(f32::to_le_bytes));
+        bytes.extend(points.flat_map(Vec3::to_array).flat_map(f32::to_le_bytes));
         bytes.extend(self.mesh.triangles.iter().flatten().flat_map(|index| index.to_le_bytes()));
         bytes.extend(corner_uvs.iter().flatten().flatten().flat_map(|coord| coord.to_le_bytes()));
         bytes.extend(image);
+        bytes.extend(normals.normals.iter().flatten().flat_map(|coord| coord.to_le_bytes()));
+        bytes.extend(normals.picks.iter().flatten());
         bytes
     }
 
     /// Reads a baked cake file and validates it, so a model that decodes is playable.
-    pub fn decode(bytes: &[u8]) -> Result<CakeModel, CakeError> {
+    ///
+    /// # Errors
+    /// [`CakeError::BadFile`] for bytes that are not a whole cake file of this version, else the
+    /// first [`CakeError`] [`Self::validate`] finds.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CakeError> {
         let mut reader = Reader { bytes };
         if reader.take::<4>()? != FILE_MAGIC || reader.read_u32()? != FILE_VERSION {
             return Err(CakeError::BadFile);
@@ -137,6 +167,7 @@ impl CakeModel {
         let triangle_len = reader.read_len()?;
         let hull_len = reader.read_len()?;
         let image_len = reader.read_len()?;
+        let normal_len = reader.read_len()?;
         let hull_lens = (0..hull_len).map(|_| reader.read_len()).collect::<Result<Vec<_>, _>>()?;
         let positions = reader.read_vecs(vertex_len)?;
         let hulls = hull_lens.into_iter().map(|len| reader.read_vecs(len)).collect::<Result<Vec<_>, _>>()?;
@@ -154,10 +185,15 @@ impl CakeModel {
             reader.bytes = &reader.bytes[image_len..];
             Skin::Textured { corner_uvs, image }
         };
+        let normals = (0..normal_len)
+            .map(|_| Ok([reader.read_u16()?, reader.read_u16()?]))
+            .collect::<Result<Vec<_>, CakeError>>()?;
+        let picks = (0..triangle_len).map(|_| reader.take::<3>()).collect::<Result<Vec<_>, _>>()?;
         if !reader.bytes.is_empty() {
             return Err(CakeError::BadFile);
         }
-        let model = CakeModel { mesh: Mesh { positions, triangles }, skin, hulls };
+        let corner_normals = CornerNormals { normals, picks };
+        let model = Self { mesh: Mesh { positions, triangles }, skin, corner_normals, hulls };
         model.validate()?;
         Ok(model)
     }
@@ -195,8 +231,20 @@ impl Reader<'_> {
 
 /// A placeholder until sourced models arrive: a round cake with a slice missing, under a smaller
 /// tier set off center.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::missing_panics_doc,
+    reason = "segment counts are small whole floats, and the fixed prisms always have normals"
+)]
 pub fn build_slice_missing_cake() -> CakeModel {
-    let mut model = CakeModel { mesh: Mesh::default(), skin: Skin::Plain, hulls: Vec::new() };
+    let mut model = CakeModel {
+        mesh: Mesh::default(),
+        skin: Skin::Plain,
+        corner_normals: CornerNormals::default(),
+        hulls: Vec::new(),
+    };
     let missing_slice_start = 290.0_f32.to_radians();
     let split = missing_slice_start / 2.0;
     for (angle0, angle1) in [(0.0, split), (split, missing_slice_start)] {
@@ -215,6 +263,8 @@ pub fn build_slice_missing_cake() -> CakeModel {
         calc_arc_outline(top_center, 0.055, 0.0, TAU * (1.0 - 1.0 / segments_per_turn), point_len)
     };
     add_prism(&mut model, build_top_outline, 0.07, 0.12);
+    model.corner_normals =
+        CornerNormals::calc(&model.mesh, CREASE_RAD).expect("prisms with area to every face and few faces at a vertex");
     model
 }
 

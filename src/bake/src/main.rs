@@ -1,35 +1,27 @@
 //! Bakes a repaired `.glb` model (from `tools/repair-model.py`) into the `.cake` file the game
-//! loads: the render mesh and its texture plus the convex hulls of its physics collider.
-//!
-//! Usage: `bake-cake <model.glb> <out.cake>`
+//! loads: the render mesh, its texture, and its shading normals, plus the convex hulls of its
+//! physics collider.
+//! `--trim-overhangs` fits the hulls with [`HullFit::TrimOverhangs`].
+
+mod collider;
 
 use std::process::ExitCode;
 use std::{env, fs};
 
-use cake_core::cakes::{CakeModel, MAX_HULL_VERTICES, Skin};
-use cake_core::mesh::Mesh;
+use cake_core::cakes::{CREASE_RAD, CakeModel, Skin};
+use cake_core::mesh::{CornerNormals, Mesh};
+use collider::{HullFit, build_hulls};
 use rapier3d::math::Vec3;
-use rapier3d::parry::transformation::convex_hull;
-use rapier3d::parry::transformation::vhacd::{VHACD, VHACDParameters};
 
-/// Voxels along the longest side when decomposing: finer finds thinner concavities.
-const VHACD_RESOLUTION: u32 = 64;
-/// How concave a part may stay, as a share of the model's size, before it is split.
-const VHACD_CONCAVITY: f32 = 0.01;
-const MAX_HULLS: u32 = 16;
-/// A hull with more vertices than this many times [`MAX_HULL_VERTICES`] sheds vertices in
-/// batches, since pricing every vertex's removal one drop at a time costs time cubic in the count.
-const COARSE_STAGE_FACTOR: usize = 4;
-/// A batch of the coarse stage sheds one in this many of a hull's vertices.
-const COARSE_BATCH_SHARE: usize = 4;
+const USAGE: &str = "usage: bake-cake <model.glb> <out.cake> [--trim-overhangs]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    let [source, destination] = args.as_slice() else {
-        eprintln!("usage: bake-cake <model.glb> <out.cake>");
+    let Some((source, destination, fit)) = parse_args(&args) else {
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
-    match bake(source, destination) {
+    match bake(source, destination, fit) {
         Ok(summary) => {
             println!("{destination}: {summary}");
             ExitCode::SUCCESS
@@ -41,15 +33,75 @@ fn main() -> ExitCode {
     }
 }
 
-fn bake(source: &str, destination: &str) -> Result<String, String> {
+/// The model to read, the cake file to write, and how to fit its hulls, or `None` for arguments
+/// [`USAGE`] does not allow.
+fn parse_args(args: &[String]) -> Option<(&str, &str, HullFit)> {
+    match args {
+        [source, destination] => Some((source, destination, HullFit::Standard)),
+        [source, destination, option] if option == "--trim-overhangs" => {
+            Some((source, destination, HullFit::TrimOverhangs))
+        }
+        _ => None,
+    }
+}
+
+fn bake(source: &str, destination: &str, fit: HullFit) -> Result<String, String> {
     let bytes = fs::read(source).map_err(|error| format!("cannot read the model: {error}"))?;
     let (mesh, skin) = fetch_mesh(&bytes)?;
-    let hulls = build_hulls(&mesh)?;
-    let model = CakeModel { mesh, skin, hulls };
+    // Before the collapse, which removes no surface but would give V-HACD other hulls.
+    let hulls = build_hulls(&mesh, fit)?;
+    let (mesh, skin, collapsed_len) = collapse_flat_triangles(mesh, skin);
+    let corner_normals = calc_corner_normals(&mesh)?;
+    let model = CakeModel { mesh, skin, corner_normals, hulls };
     model.validate().map_err(|error| format!("not a playable cake: {error:?}"))?;
     fs::write(destination, model.encode()).map_err(|error| format!("cannot write {destination}: {error}"))?;
     let hull_sizes: Vec<usize> = model.hulls.iter().map(Vec::len).collect();
-    Ok(format!("{} triangles, {} hulls with {hull_sizes:?} vertices", model.mesh.triangles.len(), model.hulls.len()))
+    let triangle_len = model.mesh.triangles.len();
+    Ok(format!(
+        "{triangle_len} triangles ({collapsed_len} collapsed away), {} hulls with {hull_sizes:?} vertices",
+        model.hulls.len()
+    ))
+}
+
+/// The mesh's shading normals, as the client once computed them when it loaded a cake.
+fn calc_corner_normals(mesh: &Mesh) -> Result<CornerNormals, String> {
+    CornerNormals::calc(mesh, CREASE_RAD).map_err(|error| format!("no corner normals: {error:?}"))
+}
+
+/// The mesh without its triangles of no area, which a corner normal cannot shade, and the skin's
+/// UVs for the triangles left, plus how many went. Each such triangle's shortest edge collapses,
+/// moving its higher-numbered vertex onto the other, which drops every triangle on that edge,
+/// until none is left; decimation leaves such edges nanometers long. The moved vertex stays in
+/// the positions unused, so the numbering scripts grab vertices by holds.
+fn collapse_flat_triangles(mut mesh: Mesh, skin: Skin) -> (Mesh, Skin, usize) {
+    let source_len = mesh.triangles.len();
+    let mut source_idxs: Vec<usize> = (0..source_len).collect();
+    let is_flat = |mesh: &Mesh, triangle: [u32; 3]| mesh.calc_face_normal(triangle) == Vec3::ZERO;
+    while let Some(flat_idx) = mesh.triangles.iter().position(|&triangle| is_flat(&mesh, triangle)) {
+        let [kept, moved] = find_shortest_edge(&mesh.positions, mesh.triangles[flat_idx]);
+        for vertex in mesh.triangles.iter_mut().flatten().filter(|vertex| **vertex == moved) {
+            *vertex = kept;
+        }
+        let is_kept: Vec<bool> = mesh.triangles.iter().map(|&[a, b, c]| a != b && b != c && c != a).collect();
+        source_idxs = source_idxs.into_iter().zip(&is_kept).filter(|&(_, &keep)| keep).map(|(idx, _)| idx).collect();
+        mesh.triangles = mesh.triangles.into_iter().zip(&is_kept).filter(|&(_, &keep)| keep).map(|(t, _)| t).collect();
+    }
+    let collapsed_len = source_len - source_idxs.len();
+    let skin = match skin {
+        Skin::Plain => Skin::Plain,
+        Skin::Textured { corner_uvs, image } => {
+            Skin::Textured { corner_uvs: source_idxs.iter().map(|&idx| corner_uvs[idx]).collect(), image }
+        }
+    };
+    (mesh, skin, collapsed_len)
+}
+
+/// The ends of `triangle`'s shortest edge, the lower-numbered first.
+fn find_shortest_edge(positions: &[Vec3], triangle: [u32; 3]) -> [u32; 2] {
+    let edges = [0, 1, 2].map(|k| [triangle[k], triangle[(k + 1) % 3]]);
+    let length = |[a, b]: [u32; 2]| positions[a as usize].distance(positions[b as usize]);
+    let shortest = edges.into_iter().min_by(|&e, &f| length(e).total_cmp(&length(f))).expect("three edges");
+    [shortest[0].min(shortest[1]), shortest[0].max(shortest[1])]
 }
 
 /// The glb vertex attribute holding, for each vertex, the index of the closed solid's vertex it
@@ -117,6 +169,7 @@ fn to_triangles(indices: &[u32], vertex_len: usize) -> Result<Vec<[usize; 3]>, S
 
 /// The solid's vertex positions, from the split vertices that copy them: `solid_ids` must name
 /// every solid vertex, and copies of one must agree.
+#[expect(clippy::float_cmp, reason = "copies of one solid vertex must agree to the bit")]
 fn rejoin(split_positions: &[[f32; 3]], solid_ids: &[u32]) -> Result<Vec<Vec3>, String> {
     let solid_len = solid_ids.iter().max().map_or(0, |&max| max as usize + 1);
     let mut positions: Vec<Option<[f32; 3]>> = vec![None; solid_len];
@@ -131,75 +184,22 @@ fn rejoin(split_positions: &[[f32; 3]], solid_ids: &[u32]) -> Result<Vec<Vec3>, 
         .into_iter()
         .enumerate()
         .map(|(solid_id, position)| {
-            position.map(Vec3::from_array).ok_or(format!("no vertex copies solid vertex {solid_id}"))
+            position.map(Vec3::from_array).ok_or_else(|| format!("no vertex copies solid vertex {solid_id}"))
         })
         .collect()
 }
 
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "rounds a coordinate in [0, u16::MAX]")]
 fn quantize_uv(uv: [f32; 2]) -> [u16; 2] {
     uv.map(|coord| (coord.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16)
 }
 
-/// The collider: the mesh's approximate convex decomposition, each hull cut down to few vertices.
-fn build_hulls(mesh: &Mesh) -> Result<Vec<Vec<Vec3>>, String> {
-    let parameters = VHACDParameters {
-        resolution: VHACD_RESOLUTION,
-        concavity: VHACD_CONCAVITY,
-        max_convex_hulls: MAX_HULLS,
-        ..Default::default()
-    };
-    let decomposition = VHACD::decompose(&parameters, &mesh.positions, &mesh.triangles, true);
-    let hulls = decomposition.compute_exact_convex_hulls(&mesh.positions, &mesh.triangles);
-    hulls
-        .into_iter()
-        .filter(|(points, _)| points.len() >= 4)
-        .map(|(points, _)| simplify_hull(&points))
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| "a collider hull is flat".to_string())
-}
-
-/// The hull of `points` with the vertices whose removal costs the least volume dropped until at
-/// most [`MAX_HULL_VERTICES`] remain. `None` when the points are flat.
-fn simplify_hull(points: &[Vec3]) -> Option<Vec<Vec3>> {
-    let mut vertices = convex_hull(points).0;
-    if calc_hull_volume(&vertices)? == 0.0 {
-        return None;
-    }
-    while vertices.len() > MAX_HULL_VERTICES {
-        let is_coarse = vertices.len() > COARSE_STAGE_FACTOR * MAX_HULL_VERTICES;
-        let drop_len = if is_coarse { vertices.len() / COARSE_BATCH_SHARE } else { 1 };
-        let mut costs: Vec<(usize, f32)> = (0..vertices.len())
-            .map(|idx| {
-                let mut rest = vertices.clone();
-                rest.swap_remove(idx);
-                (idx, calc_hull_volume(&rest).unwrap_or(0.0))
-            })
-            .collect();
-        costs.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let dropped: Vec<usize> = costs.iter().take(drop_len).map(|&(idx, _)| idx).collect();
-        let rest: Vec<Vec3> =
-            vertices.iter().enumerate().filter(|(idx, _)| !dropped.contains(idx)).map(|(_, &v)| v).collect();
-        vertices = convex_hull(&rest).0;
-    }
-    Some(vertices)
-}
-
-/// The volume of the points' convex hull, or `None` when there are too few to span one.
-fn calc_hull_volume(points: &[Vec3]) -> Option<f32> {
-    if points.len() < 4 {
-        return None;
-    }
-    let (vertices, triangles) = convex_hull(points);
-    let volume = triangles
-        .iter()
-        .map(|&[a, b, c]| vertices[a as usize].dot(vertices[b as usize].cross(vertices[c as usize])))
-        .sum::<f32>()
-        / 6.0;
-    Some(volume.abs())
-}
-
 #[cfg(test)]
+#[expect(clippy::cast_possible_truncation, reason = "the fixtures count a handful of elements")]
 mod tests {
+    use cake_core::cakes::MAX_HULL_VERTICES;
+    use rapier3d::glamx::DVec3;
+
     use super::*;
 
     /// Two overlapping boxes merged into an L, 0.2 m long, made by `tools/repair-model.py`.
@@ -207,30 +207,64 @@ mod tests {
 
     #[test]
     fn l_shaped_model_bakes_into_a_playable_cake_with_a_hull_per_arm() {
-        let (mesh, skin) = fetch_mesh(L_SHAPE_GLB).unwrap();
-        let hulls = build_hulls(&mesh).unwrap();
-        let model = CakeModel { mesh, skin, hulls };
-        assert_eq!(model.validate(), Ok(()));
-        assert!(model.hulls.len() >= 2, "an L is concave, so one hull would fill its corner");
-        assert!(model.hulls.iter().all(|hull| hull.len() <= MAX_HULL_VERTICES));
-        assert_eq!(CakeModel::decode(&model.encode()), Ok(model));
+        for fit in [HullFit::Standard, HullFit::TrimOverhangs] {
+            let (mesh, skin) = fetch_mesh(L_SHAPE_GLB).unwrap();
+            let hulls = build_hulls(&mesh, fit).unwrap();
+            let corner_normals = calc_corner_normals(&mesh).unwrap();
+            let model = CakeModel { mesh, skin, corner_normals, hulls };
+            assert_eq!(model.validate(), Ok(()));
+            assert!(model.hulls.len() >= 2, "{fit:?}: an L is concave, so one hull would fill its corner");
+            assert!(model.hulls.iter().all(|hull| hull.len() <= MAX_HULL_VERTICES));
+            assert_eq!(CakeModel::decode(&model.encode()), Ok(model));
+        }
     }
 
     #[test]
-    fn dense_hull_is_cut_to_the_vertex_limit_keeping_most_of_its_volume() {
-        let point_len = 8 * MAX_HULL_VERTICES;
-        let golden_angle = core::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
-        let sphere: Vec<Vec3> = (0..point_len)
-            .map(|idx| {
-                let y = 1.0 - 2.0 * (idx as f32 + 0.5) / point_len as f32;
-                let ring_radius = (1.0 - y * y).sqrt();
-                let angle = golden_angle * idx as f32;
-                Vec3::new(ring_radius * angle.cos(), y, ring_radius * angle.sin())
-            })
-            .collect();
-        let simplified = simplify_hull(&sphere).unwrap();
-        assert!(simplified.len() <= MAX_HULL_VERTICES);
-        assert!(calc_hull_volume(&simplified).unwrap() > 0.8 * calc_hull_volume(&sphere).unwrap());
+    fn every_vertex_of_the_l_shaped_model_lies_within_the_slack_of_a_hull() {
+        let (mesh, _) = fetch_mesh(L_SHAPE_GLB).unwrap();
+        let hulls = build_hulls(&mesh, HullFit::Standard).unwrap();
+        let planes: Vec<Vec<(DVec3, f64)>> = hulls.iter().map(|hull| build_supporting_planes(hull)).collect();
+        let tolerance_m = collider::HULL_SLACK_M + 1e-6;
+        for position in &mesh.positions {
+            let p = position.as_dvec3();
+            let is_covered =
+                planes.iter().any(|hull| hull.iter().all(|&(normal, offset)| normal.dot(p) <= offset + tolerance_m));
+            assert!(is_covered, "{position:?} lies outside every hull");
+        }
+    }
+
+    /// Every plane through three of `hull`'s vertices with all the others on one side, facing out.
+    fn build_supporting_planes(hull: &[Vec3]) -> Vec<(DVec3, f64)> {
+        let points: Vec<DVec3> = hull.iter().map(|v| v.as_dvec3()).collect();
+        let mut planes = Vec::new();
+        for (idx_a, &a) in points.iter().enumerate() {
+            for (idx_b, &b) in points.iter().enumerate().skip(idx_a + 1) {
+                for &c in points.iter().skip(idx_b + 1) {
+                    let Some(normal) = (b - a).cross(c - a).try_normalize() else { continue };
+                    let sides: Vec<f64> = points.iter().map(|p| normal.dot(*p - a)).collect();
+                    if sides.iter().all(|&side| side <= 1e-9) {
+                        planes.push((normal, normal.dot(a)));
+                    } else if sides.iter().all(|&side| side >= -1e-9) {
+                        planes.push((-normal, -normal.dot(a)));
+                    }
+                }
+            }
+        }
+        planes
+    }
+
+    #[test]
+    fn trim_overhangs_after_the_two_paths_selects_the_trimming_fit() {
+        let args = ["model.glb", "out.cake", "--trim-overhangs"].map(String::from);
+        assert_eq!(parse_args(&args), Some(("model.glb", "out.cake", HullFit::TrimOverhangs)));
+        assert_eq!(parse_args(&args[..2]), Some(("model.glb", "out.cake", HullFit::Standard)));
+    }
+
+    #[test]
+    fn an_unknown_option_or_a_missing_path_is_refused() {
+        assert_eq!(parse_args(&["model.glb", "out.cake", "--trim"].map(String::from)), None);
+        assert_eq!(parse_args(&["--trim-overhangs", "model.glb", "out.cake"].map(String::from)), None);
+        assert_eq!(parse_args(&["model.glb"].map(String::from)), None);
     }
 
     #[test]
@@ -255,6 +289,24 @@ mod tests {
     fn a_solid_vertex_no_copy_names_is_refused() {
         let error = rejoin(&[[0.0, 0.0, 0.0]], &[1]).unwrap_err();
         assert!(error.contains("solid vertex 0"), "{error}");
+    }
+
+    #[test]
+    fn a_vertex_split_by_flat_triangles_collapses_back_with_the_uvs_following() {
+        // A closed tetrahedron whose vertex 3 has a copy, vertex 4, at the same place, joined to it
+        // by two triangles of no area.
+        let positions = vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z, Vec3::Z];
+        let triangles = vec![[0, 2, 1], [0, 1, 3], [1, 2, 4], [1, 4, 3], [4, 2, 0], [3, 4, 0]];
+        let mesh = Mesh { positions, triangles };
+        assert_eq!(mesh.validate_closed(), Ok(()));
+        let corner_uvs = (0..mesh.triangles.len() as u16).map(|idx| [[idx, 0]; 3]).collect();
+        let skin = Skin::Textured { corner_uvs, image: b"RIFF....WEBP".to_vec() };
+        let (mesh, skin, collapsed_len) = collapse_flat_triangles(mesh, skin);
+        assert_eq!(mesh.triangles, vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [3, 2, 0]]);
+        assert_eq!(mesh.validate_closed(), Ok(()));
+        assert_eq!(collapsed_len, 2);
+        let Skin::Textured { corner_uvs, .. } = skin else { panic!("the skin stays textured") };
+        assert_eq!(corner_uvs.iter().map(|uvs| uvs[0][0]).collect::<Vec<_>>(), [0, 1, 2, 4]);
     }
 
     #[test]

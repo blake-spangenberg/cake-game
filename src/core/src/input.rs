@@ -41,17 +41,18 @@ pub enum InputError {
 }
 
 impl Input {
-    pub fn encode(&self) -> [i32; ENCODED_LEN] {
-        let (flags, grab_at, target_xz) = match self.hand {
+    #[must_use]
+    pub const fn encode(&self) -> [i32; ENCODED_LEN] {
+        let (flags, [grab_x, grab_y, grab_z], [target_x, target_z]) = match self.hand {
             Some(hand) => (FLAG_HOLDING, hand.grab_at, hand.target_xz),
             None => (0, [0; 3], [0; 2]),
         };
-        let [grab_x, grab_y, grab_z] = grab_at;
-        let [target_x, target_z] = target_xz;
         [flags, grab_x, grab_y, grab_z, target_x, target_z, self.knife.tilt, self.knife.lower, self.stand_angle]
     }
 
-    pub fn decode(encoded: &[i32]) -> Result<Input, InputError> {
+    /// # Errors
+    /// [`InputError`] for a slice of the wrong length or with flags this version does not know.
+    pub fn decode(encoded: &[i32]) -> Result<Self, InputError> {
         let &[flags, grab_x, grab_y, grab_z, target_x, target_z, tilt, lower, stand_angle] = encoded else {
             return Err(InputError::Length { len: encoded.len() });
         };
@@ -60,22 +61,28 @@ impl Input {
         }
         let hand = (flags & FLAG_HOLDING != 0)
             .then_some(HandInput { grab_at: [grab_x, grab_y, grab_z], target_xz: [target_x, target_z] });
-        Ok(Input { hand, knife: KnifeInput { tilt, lower }, stand_angle })
+        Ok(Self { hand, knife: KnifeInput { tilt, lower }, stand_angle })
     }
 }
 
+#[must_use]
 pub fn calc_meters(quantized: i32) -> f64 {
-    quantized as f64 * POSITION_UNIT_M
+    f64::from(quantized) * POSITION_UNIT_M
 }
 
+#[must_use]
 pub fn calc_radians(quantized: i32) -> f64 {
-    quantized as f64 * ANGLE_UNIT_RAD
+    f64::from(quantized) * ANGLE_UNIT_RAD
 }
 
+#[must_use]
+#[expect(clippy::cast_possible_truncation, reason = "the wire format's saturating quantization")]
 pub fn quantize_meters(meters: f64) -> i32 {
     (meters / POSITION_UNIT_M).round() as i32
 }
 
+#[must_use]
+#[expect(clippy::cast_possible_truncation, reason = "the wire format's saturating quantization")]
 pub fn quantize_radians(radians: f64) -> i32 {
     (radians / ANGLE_UNIT_RAD).round() as i32
 }

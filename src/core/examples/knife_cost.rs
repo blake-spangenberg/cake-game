@@ -7,6 +7,13 @@
 //! when only the speed of the knife's scans does. `.agent/scripts/knife-cost-wasm.mjs` repeats it
 //! in WASM.
 
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "percentiles and scripted inputs over counts far below f64's whole-number range"
+)]
+
 use std::time::{Duration, Instant};
 
 use cake_core::cakes::CakeModel;
@@ -39,7 +46,7 @@ fn main() {
         let model = CakeModel::decode(&std::fs::read(path).expect("cake file readable")).expect("cake file playable");
         let start = Instant::now();
         for _ in 0..BUILD_REPEATS {
-            TriangleTree::build(&model.mesh.positions, &model.mesh.triangles);
+            std::hint::black_box(TriangleTree::build(&model.mesh.positions, &model.mesh.triangles));
         }
         let build_cost = start.elapsed() / BUILD_REPEATS;
         let (vertex_len, triangle_len) = (model.mesh.positions.len(), model.mesh.triangles.len());
@@ -67,8 +74,8 @@ fn report(name: &str, round: Round, model: CakeModel) {
             continue;
         }
         press_costs.push(cost);
-        touching_ticks += (world.calc_cake_touch_lower_m() <= world.get_knife().lower_m + TOUCH_M) as u32;
-        blocked_ticks += world.is_stand_blocked() as u32;
+        touching_ticks += u32::from(world.calc_cake_touch_lower_m() <= world.get_knife().lower_m + TOUCH_M);
+        blocked_ticks += u32::from(world.is_stand_blocked());
     }
     press_costs.sort();
     let at = |fraction: f64| press_costs[((press_costs.len() - 1) as f64 * fraction) as usize];
@@ -89,7 +96,7 @@ fn build_inputs(round: Round, model: &CakeModel) -> Vec<Input> {
         let hand = (20..240).contains(&tick).then_some(carry);
         let tilt = match round {
             Round::Wall => start_tilt,
-            Round::Top => start_tilt - (start_tilt as i64 * tick as i64 / (CARRY_TICKS - 1) as i64) as i32,
+            Round::Top => start_tilt - (i64::from(start_tilt) * i64::from(tick) / i64::from(CARRY_TICKS - 1)) as i32,
         };
         Input { hand, knife: KnifeInput { tilt, lower: 0 }, stand_angle: 0 }
     });

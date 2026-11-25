@@ -6,6 +6,24 @@ resolver = "3"
 edition = "2024"
 license = "LGPL-2.1-only"
 
+# The strict lints of https://www.namtao.com/rust/, less what this repo contradicts: see
+# doc/maintainer/tech-stack.md. Every crate opts in with `[lints] workspace = true`, and
+# clippy.toml relaxes the panic lints in tests.
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+exit = "deny"
+# Their fixes (mul_add, hypot, exp_m1) change results, and so every hash, and call std's math,
+# which the determinism rules keep out of the simulation.
+suboptimal_flops = "allow"
+imprecise_flops = "allow"
+
 [profile.dev.package.cake-core]
 opt-level = 3
 

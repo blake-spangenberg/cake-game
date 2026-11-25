@@ -59,6 +59,10 @@ serve: wasm cakes
 	cd src/client && npx vite build
 	cargo run --release -p cake-server -- --listen $(SERVE_LISTEN) --client-dir $(BUILD_DIR)/client
 
+# Cakes the determinism test replays beside the placeholder: the Marble Bust and Work Boot, whose
+# native and WASM worlds once parted on platform math in their mass properties.
+REPLAY_CAKES := fc6e731a0131471ba8e45511c7ea9996 d9506d9a318e4c56ac3d8ab273bd2540
+
 test: wasm
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
@@ -68,8 +72,8 @@ test: wasm
 	node tools/check-cakes.mjs
 	node tools/check-libraries.mjs
 	uv run --locked --script tools/test-repair-model.py
-	cargo run -q --release -p cake-core --example replay > $(BUILD_DIR)/replay-native.txt
-	node tools/replay-wasm.mjs $(WASM_DIR) > $(BUILD_DIR)/replay-wasm.txt
+	cargo run -q --release -p cake-core --example replay -- $(REPLAY_CAKES) > $(BUILD_DIR)/replay-native.txt
+	node tools/replay-wasm.mjs $(WASM_DIR) $(REPLAY_CAKES) > $(BUILD_DIR)/replay-wasm.txt
 	diff $(BUILD_DIR)/replay-native.txt $(BUILD_DIR)/replay-wasm.txt
 
 format:
@@ -87,6 +91,9 @@ cakes: build/.gitignore
 	rm -rf build/public/previews
 	mkdir build/public/previews
 	cp assets/previews/*.webp build/public/previews/
+	rm -rf build/public/rules
+	mkdir build/public/rules
+	cp assets/rules/*.webp build/public/rules/
 
 # Rerenders the lobby picker's previews of cakes rebaked since their last render.
 previews: wasm

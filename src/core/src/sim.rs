@@ -1,24 +1,27 @@
 mod hand;
+mod mass;
 mod setup;
 
 use std::sync::Arc;
 
-use rapier3d::glamx::DVec3;
+use rapier3d::glamx::{DQuat, DVec3};
 use rapier3d::prelude::*;
 
 use crate::cakes::CakeModel;
 use crate::cut::{Split, calc_split};
 use crate::input::{Input, KnifeInput, calc_radians};
-use crate::knife::{Knife, PosedTree, Solid, Turn, calc_rest_m, calc_sweep_reach};
+use crate::knife::{BLADE_BACK_M, Knife, PosedTree, Solid, Turn, calc_rest_m, calc_sweep_reach};
 use crate::table::{CAKE_SPAWN, RESPAWN_BELOW_Y_M};
 use hand::Grip;
 pub use setup::Cake;
-use setup::{StandPlate, insert_cake, insert_knife, insert_stand, insert_table};
+use setup::{StandPlate, insert_cake, insert_knife, insert_stand, insert_table, insert_under_plate_fill};
 
 pub const TICKS_PER_S: u32 = 60;
 /// A competitive round's length, at whose last tick the cut happens for anyone who has not cut.
 pub const ROUND_TICKS: u32 = 30 * TICKS_PER_S;
 const DT_S: f64 = 1.0 / TICKS_PER_S as f64;
+#[expect(clippy::cast_possible_truncation, reason = "Rapier steps in f32")]
+const RAPIER_DT_S: f32 = DT_S as f32;
 /// Rapier scales its slop, contact prediction, and sleep thresholds by this, so they suit
 /// objects a decimeter across instead of a meter.
 const LENGTH_UNIT_M: f32 = 0.1;
@@ -33,6 +36,18 @@ const CAKE_FRICTION: f32 = 0.9;
 /// gravity keeps driving, it stops an off-balance cake rocking or rolling on its rim outright,
 /// while tipping over still outpaces it.
 const ROLL_RESISTANCE_RAD_PER_S2: f32 = 80.0;
+/// A free cake whose every point stays within this of where it was for at least three
+/// [`STILL_QUARTER_TICKS`], moving no further in the last of them than in the one before, is put to
+/// sleep. Rapier's own sleep needs it slower than 5 mm/s at its farthest point throughout, which a
+/// cake rocking in place on a single contact, such as the stand's rim, never is. A cake tipping
+/// over from near balance creeps at first, since the rolling resistance takes off each tick's small
+/// spin, but speeds up as it leans, which the comparison tells apart from rocking. The first
+/// quarter is never compared, since it holds the jolt of landing.
+const STILL_DRIFT_M: f64 = 0.005;
+const STILL_QUARTER_TICKS: u32 = TICKS_PER_S / 4;
+/// How far a free cake rising into the pressed edge may raise the knife in one tick. A cake that
+/// would raise it further moved into the blade from the side, and the blade stops it instead.
+const MAX_CAKE_PUSH_M: f64 = 0.005;
 /// Across this gap between the cake's bounding box and the stand's rim, the resting knife turns
 /// from waiting over the cake's middle height to following its height as posed. It reaches past
 /// where the cake spawns, so the knife there already partly follows, and leaves the table's far
@@ -52,17 +67,16 @@ pub enum Phase {
 pub struct World {
     physics: PhysicsWorld,
     cake: RigidBodyHandle,
-    /// The cake's hulls as one shape, for sweeping it along the hand's moves.
-    cake_shape: SharedShape,
     hand: RigidBodyHandle,
     grip: Option<Grip>,
-    stand: RigidBodyHandle,
     stand_angle_rad: f64,
     /// Whether the knife stopped the stand short of its input last tick.
     is_stand_blocked: bool,
     stand_plate: StandPlate,
     knife_body: RigidBodyHandle,
-    knife_colliders: Vec<ColliderHandle>,
+    /// What only a held cake collides with: the knife's blade and handles, and the space under the
+    /// stand's plate.
+    held_colliders: Vec<ColliderHandle>,
     /// What this world shares with every other on the same cake.
     shared: Arc<Cake>,
     bounding_radius_m: f64,
@@ -74,6 +88,14 @@ pub struct World {
     cake_positions_pose: Pose,
     /// Ticks since the cake fell off the table.
     fallen_ticks: u32,
+    /// Where the awake free cake has stayed within [`STILL_DRIFT_M`] of for `still_ticks`.
+    still_pose: Pose,
+    /// The cake's poses at the last two [`STILL_QUARTER_TICKS`] boundaries since `still_pose`.
+    still_marks: [Pose; 2],
+    still_ticks: u32,
+    /// Whether the pressed blade stopped the cake, which then rests against it until the knife
+    /// moves.
+    is_cake_against_blade: bool,
     knife: Knife,
     tick: u32,
     round_ticks: Option<u32>,
@@ -84,38 +106,41 @@ impl World {
     /// A world whose knife rests at `knife_tilt_rad` over the cake, and that cuts itself at
     /// `round_ticks`, or never with `None`. Passing a [`CakeModel`] builds its [`Cake`] for this
     /// world alone.
-    pub fn create(shared: impl Into<Arc<Cake>>, knife_tilt_rad: f64, round_ticks: Option<u32>) -> World {
+    pub fn create(shared: impl Into<Arc<Cake>>, knife_tilt_rad: f64, round_ticks: Option<u32>) -> Self {
         let shared = shared.into();
         let knife = Knife { tilt_rad: knife_tilt_rad, rest_m: 0.0, rest_lead_m: 0.0, lower_m: 0.0 };
         let mut physics = PhysicsWorld::new();
-        physics.integration_parameters.dt = DT_S as f32;
+        physics.integration_parameters.dt = RAPIER_DT_S;
         physics.integration_parameters.length_unit = LENGTH_UNIT_M;
         insert_table(&mut physics);
         let stand = insert_stand(&mut physics);
         let cake = insert_cake(&mut physics, &shared);
         let hand = physics.insert_body(RigidBodyBuilder::kinematic_position_based());
-        let (knife_body, knife_colliders) = insert_knife(&mut physics, &knife);
+        let (knife_body, mut held_colliders) = insert_knife(&mut physics, &knife);
+        held_colliders.push(insert_under_plate_fill(&mut physics, stand));
         let com = physics.bodies[cake].mass_properties().local_mprops.local_com;
-        let bounding_radius_m = shared.get_model().mesh.calc_max_distance_from(com) as f64;
+        let bounding_radius_m = f64::from(shared.get_model().mesh.calc_max_distance_from(com));
         let (flattest_m, tallest_m) = shared.width_range_m;
-        let mut world = World {
+        let mut world = Self {
             physics,
             cake,
-            cake_shape: shared.shape.clone(),
             hand,
             grip: None,
-            stand,
             stand_angle_rad: 0.0,
             is_stand_blocked: false,
             stand_plate: StandPlate::build(),
             knife_body,
-            knife_colliders,
+            held_colliders,
             shared,
             bounding_radius_m,
-            waiting_height_m: (flattest_m + tallest_m) / 2.0,
+            waiting_height_m: f64::midpoint(flattest_m, tallest_m),
             cake_positions: Vec::new(),
             cake_positions_pose: Pose::IDENTITY,
             fallen_ticks: 0,
+            still_pose: Pose::IDENTITY,
+            still_marks: [Pose::IDENTITY; 2],
+            still_ticks: 0,
+            is_cake_against_blade: false,
             knife,
             tick: 0,
             round_ticks,
@@ -133,10 +158,13 @@ impl World {
         }
         self.step_hand(input.hand);
         self.step_stand(input.stand_angle);
-        self.step_knife(&input.knife);
+        self.step_knife(input.knife);
         self.resist_rolling();
+        let before_step = *self.physics.bodies[self.cake].position();
         self.physics.step();
         self.update_cake_positions();
+        self.ensure_cake_outside_blade(before_step);
+        self.ensure_still_cake_sleeps();
         self.ensure_cake_on_table();
         self.tick += 1;
         if self.round_ticks.is_some_and(|round_ticks| self.tick >= round_ticks) {
@@ -176,15 +204,15 @@ impl World {
         self.knife.calc_lower_limit_m(&[self.as_cake_solid()])
     }
 
-    pub fn get_phase(&self) -> Phase {
+    pub const fn get_phase(&self) -> Phase {
         self.phase
     }
 
-    pub fn get_tick(&self) -> u32 {
+    pub const fn get_tick(&self) -> u32 {
         self.tick
     }
 
-    pub fn get_knife(&self) -> &Knife {
+    pub const fn get_knife(&self) -> &Knife {
         &self.knife
     }
 
@@ -196,17 +224,17 @@ impl World {
         *self.physics.bodies[self.cake].position()
     }
 
-    pub fn get_stand_angle_rad(&self) -> f64 {
+    pub const fn get_stand_angle_rad(&self) -> f64 {
         self.stand_angle_rad
     }
 
     /// Whether the knife stopped the stand short of its input last tick, for the client to stop
     /// the drag there too.
-    pub fn is_stand_blocked(&self) -> bool {
+    pub const fn is_stand_blocked(&self) -> bool {
         self.is_stand_blocked
     }
 
-    pub fn is_holding(&self) -> bool {
+    pub const fn is_holding(&self) -> bool {
         self.grip.is_some()
     }
 
@@ -215,7 +243,9 @@ impl World {
         &self.cake_positions
     }
 
-    /// FNV-1a over the state that later ticks depend on, for comparing two simulations.
+    /// FNV-1a over the state that later ticks depend on, for comparing two simulations. State
+    /// copied from earlier ticks' hashed state, such as the pose a still cake is measured from, is
+    /// left out, since a divergence there showed in the hash when it was copied.
     pub fn calc_hash(&self) -> u64 {
         let cake = &self.physics.bodies[self.cake];
         let hand = &self.physics.bodies[self.hand];
@@ -236,65 +266,118 @@ impl World {
             hash.write(&value.to_bits().to_le_bytes());
         }
         hash.write(&self.fallen_ticks.to_le_bytes());
+        hash.write(&self.still_ticks.to_le_bytes());
+        hash.write(&[u8::from(self.is_cake_against_blade)]);
         Grip::write_hash(self.grip.as_ref(), &mut hash);
         hash.finish()
     }
 
-    /// Slows a free cake's spin relative to the table or stand it rests on, so the turning
-    /// stand still carries it round.
+    /// Slows a free cake's spin while it touches the table or stand, neither of which spins in the
+    /// physics.
     fn resist_rolling(&mut self) {
-        if self.grip.is_some() {
+        if self.grip.is_some() || !self.is_cake_supported() {
             return;
         }
-        let Some(support) = self.find_cake_support() else {
-            return;
-        };
-        let support_spin = self.physics.bodies[support].angvel();
         let cake = &mut self.physics.bodies[self.cake];
-        let spin = cake.angvel() - support_spin;
+        let spin = cake.angvel();
         let spin_len = spin.length();
         if spin_len == 0.0 {
             return;
         }
-        let slowed_len = (spin_len - ROLL_RESISTANCE_RAD_PER_S2 * DT_S as f32).max(0.0);
-        cake.set_angvel(support_spin + spin * (slowed_len / spin_len), false);
+        let slowed_len = (spin_len - ROLL_RESISTANCE_RAD_PER_S2 * RAPIER_DT_S).max(0.0);
+        cake.set_angvel(spin * (slowed_len / spin_len), false);
     }
 
-    /// The body the cake touches other than the knife, as of the last tick, if any.
-    fn find_cake_support(&self) -> Option<RigidBodyHandle> {
-        let colliders = &self.physics.colliders;
-        self.physics.bodies[self.cake].colliders().iter().find_map(|&collider| {
-            self.physics.contact_pairs_with(collider).find_map(|pair| {
+    /// Puts the free cake to sleep once it has stayed in place and stopped speeding up, as
+    /// [`STILL_DRIFT_M`] describes, though it may still rock or creep there too slightly to leave it.
+    fn ensure_still_cake_sleeps(&mut self) {
+        let cake = &self.physics.bodies[self.cake];
+        let pose = *cake.position();
+        if self.grip.is_some() || cake.is_sleeping() || self.calc_drift_m(self.still_pose, pose) > STILL_DRIFT_M {
+            self.still_pose = pose;
+            self.still_marks = [pose; 2];
+            self.still_ticks = 0;
+            return;
+        }
+        self.still_ticks += 1;
+        if !self.still_ticks.is_multiple_of(STILL_QUARTER_TICKS) {
+            return;
+        }
+        let [earlier, later] = self.still_marks;
+        let is_slowing = self.calc_drift_m(later, pose) <= self.calc_drift_m(earlier, later);
+        if self.still_ticks >= 3 * STILL_QUARTER_TICKS && is_slowing {
+            self.physics.bodies[self.cake].sleep();
+            return;
+        }
+        self.still_marks = [later, pose];
+    }
+
+    /// At most how far any point of the cake moves from pose `a` to `b`.
+    fn calc_drift_m(&self, a: Pose, b: Pose) -> f64 {
+        let com = self.physics.bodies[self.cake].mass_properties().local_mprops.local_com;
+        let shift_m = f64::from(a.transform_point(com).distance(b.transform_point(com)));
+        let turn = b.rotation * a.rotation.inverse();
+        // A unit quaternion's `xyz` is as long as the sine of half its turn, so this is the chord
+        // the farthest point sweeps.
+        let chord_m = 2.0 * f64::from(turn.xyz().length()) * self.bounding_radius_m;
+        shift_m + chord_m
+    }
+
+    /// Whether the cake touches anything other than the knife, as of the last tick.
+    fn is_cake_supported(&self) -> bool {
+        self.physics.bodies[self.cake].colliders().iter().any(|&collider| {
+            self.physics.contact_pairs_with(collider).any(|pair| {
                 let other = if pair.collider1 == collider { pair.collider2 } else { pair.collider1 };
-                let is_support = pair.has_any_active_contact() && !self.knife_colliders.contains(&other);
-                is_support.then(|| colliders[other].parent()).flatten()
+                pair.has_any_active_contact() && !self.held_colliders.contains(&other)
             })
         })
     }
 
+    #[expect(clippy::float_cmp, reason = "a sweep that stopped short returns any other angle")]
     fn step_stand(&mut self, stand_angle: i32) {
+        let from_rad = self.stand_angle_rad;
         let max_step_rad = STAND_SPEED_RAD_PER_S * DT_S;
-        let step_rad = (calc_radians(stand_angle) - self.stand_angle_rad).clamp(-max_step_rad, max_step_rad);
-        let wanted_rad = self.stand_angle_rad + step_rad;
+        let step_rad = (calc_radians(stand_angle) - from_rad).clamp(-max_step_rad, max_step_rad);
+        let wanted_rad = from_rad + step_rad;
         self.stand_angle_rad = self.calc_stand_reach_rad(wanted_rad);
         self.is_stand_blocked = self.stand_angle_rad != wanted_rad;
         if self.is_stand_blocked {
             // The knife holds the cake, which would otherwise spin on into the blade.
             let cake = &mut self.physics.bodies[self.cake];
-            cake.set_linvel(Vector::ZERO, true);
-            cake.set_angvel(Vector::ZERO, true);
+            cake.set_linvel(Vector::ZERO, false);
+            cake.set_angvel(Vector::ZERO, false);
         }
-        let half_rad = self.stand_angle_rad / 2.0;
-        let rotation = Rotation::from_xyzw(0.0, libm::sin(half_rad) as f32, 0.0, libm::cos(half_rad) as f32);
-        self.physics.bodies[self.stand].set_next_kinematic_rotation(rotation);
+        let turn_rad = self.stand_angle_rad - from_rad;
+        if turn_rad != 0.0 && self.is_riding_stand() {
+            self.carry_cake_round(turn_rad);
+        }
+    }
+
+    /// Whether the cake is free and sits on the stand, so that it turns with it.
+    fn is_riding_stand(&self) -> bool {
+        self.grip.is_none() && self.is_on_stand()
+    }
+
+    /// Turns the cake riding the stand with it by `turn_rad`, keeping its motion relative to the
+    /// stand. A turning plate would carry it by friction alone, which Rapier's contacts let slip
+    /// outward every tick, since they match velocities, not positions.
+    fn carry_cake_round(&mut self, turn_rad: f64) {
+        let half_rad = turn_rad / 2.0;
+        let turn = DQuat::from_xyzw(0.0, libm::sin(half_rad), 0.0, libm::cos(half_rad)).as_quat();
+        let cake = &mut self.physics.bodies[self.cake];
+        let pose = cake.position();
+        let turned = Pose::from_parts(turn * pose.translation, (turn * pose.rotation).normalize());
+        let (linvel, angvel) = (turn * cake.linvel(), turn * cake.angvel());
+        cake.set_position(turned, false);
+        cake.set_linvel(linvel, false);
+        cake.set_angvel(angvel, false);
     }
 
     /// How far the stand turns toward `to_rad` before the cake riding it would meet the lowered
     /// knife.
     fn calc_stand_reach_rad(&self, to_rad: f64) -> f64 {
-        let is_riding = self.grip.is_none() && self.is_on_stand();
         // A cake turning on the stand keeps its height, so it stays clear of the resting knife.
-        if !is_riding || self.knife.lower_m <= self.knife.rest_m {
+        if !self.is_riding_stand() || !self.knife.is_lowered() {
             return to_rad;
         }
         let from_rad = self.stand_angle_rad;
@@ -313,13 +396,18 @@ impl World {
         Solid { tree: Some(tree), ..Solid::new(&self.cake_positions, &self.shared.get_model().mesh.triangles) }
     }
 
-    fn step_knife(&mut self, input: &KnifeInput) {
+    fn step_knife(&mut self, input: KnifeInput) {
         let mut knife = self.knife;
         knife.float_over(self.calc_rest_height_m(), DT_S);
         let (cake, plate) = (self.as_cake_solid(), self.stand_plate.as_solid());
         // A held cake meets the knife's collider instead, so the blade holds its place against it.
         let solids: &[Solid] = if self.grip.is_some() { &[plate] } else { &[cake, plate] };
-        knife.step(input, solids);
+        knife.step(&input, solids);
+        let is_moved = (knife.tilt_rad, knife.lower_m) != (self.knife.tilt_rad, self.knife.lower_m);
+        if self.is_cake_against_blade && is_moved {
+            self.is_cake_against_blade = false;
+            self.physics.bodies[self.cake].wake_up(true);
+        }
         self.knife = knife;
         self.physics.bodies[self.knife_body].set_next_kinematic_position(self.knife.calc_pose());
     }
@@ -340,9 +428,29 @@ impl World {
         high_m - low_m
     }
 
+    /// Puts a free cake that moved into the pressed blade this tick back where it was before the
+    /// step and stops it, as the blade would: the lowering limit sees only the blade's plane, so it
+    /// would jump the knife onto the cake. One crossing the plane above the blade's back passes over
+    /// it.
+    fn ensure_cake_outside_blade(&mut self, before_step: Pose) {
+        if self.grip.is_some() || !self.knife.is_lowered() {
+            return;
+        }
+        let jump_m = self.knife.lower_m - self.calc_cake_touch_lower_m();
+        if !(MAX_CAKE_PUSH_M..BLADE_BACK_M).contains(&jump_m) {
+            return;
+        }
+        let cake = &mut self.physics.bodies[self.cake];
+        cake.set_position(before_step, false);
+        cake.set_linvel(Vector::ZERO, false);
+        cake.set_angvel(Vector::ZERO, false);
+        self.is_cake_against_blade = true;
+        self.update_cake_positions();
+    }
+
     /// Respawns a cake that fell off the table, once it has fallen for a while.
     fn ensure_cake_on_table(&mut self) {
-        if self.physics.bodies[self.cake].translation().y as f64 >= RESPAWN_BELOW_Y_M {
+        if f64::from(self.physics.bodies[self.cake].translation().y) >= RESPAWN_BELOW_Y_M {
             return;
         }
         self.fallen_ticks += 1;
@@ -372,17 +480,17 @@ impl World {
 struct Fnv1a(u64);
 
 impl Fnv1a {
-    fn new() -> Self {
-        Fnv1a(0xcbf2_9ce4_8422_2325)
+    const fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
     }
 
     fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            self.0 = (self.0 ^ byte as u64).wrapping_mul(0x0100_0000_01b3);
+            self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
         }
     }
 
-    fn finish(&self) -> u64 {
+    const fn finish(&self) -> u64 {
         self.0
     }
 }

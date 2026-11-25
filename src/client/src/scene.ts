@@ -1,29 +1,24 @@
 import * as THREE from "three";
-import { type Game, type Layout, get_blade_outline, get_handle_centers, get_stand_parts } from "@wasm/cake_wasm.js";
+import { type Game, type Layout, get_blade_outline, get_stand_parts } from "@wasm/cake_wasm.js";
+import { CutFaceMaterial } from "./cutFace";
+import { waitFrames } from "./frames";
 import { HalfLabels } from "./halfLabels";
-import { Spring } from "./spring";
+import { type SlicedJob, type Supports, calcHalfRests } from "./halfRest";
+import { FROSTING, type ShadowArea, addLights, buildCakeGeometry, buildKnife, buildStand, buildTable, calcKnifeNormal, decodeCakeTexture, placeKnife } from "./props";
 
 /** What a click grabbed: the cake, any part of the knife (blade or handles), or the cake stand. */
 export type PickKind = "cake" | "knife" | "stand";
 
-const SPONGE = 0xe8c07a;
-/** The color of a cake with no texture of its own. */
-const FROSTING = 0xf3e3ec;
-/** Neighboring faces meeting at a sharper angle than this keep a hard edge; gentler ones shade smoothly. */
-const CREASE_ANGLE_RAD = Math.PI / 3;
-const TABLE_THICKNESS_M = 0.04;
-const LEG_SIDE_M = 0.06;
-const LEG_INSET_M = 0.08;
-const LEG_LEN_M = 0.72;
-const RIM_BEAD_COUNT = 16;
-/**
- * How far each half slides across the table or plate away from the cut once parted, level, so
- * neither half sinks into what it rests on whatever the knife's tilt.
- */
-const HALF_SLIDE_M = 0.09;
+/** The color a textured cake's material multiplies its texture by, which leaves it as it is. */
+const UNTINTED = 0xffffff;
+/** The whole table, which the camera can see from any side. */
+const SHADOW: ShadowArea = { extentM: 1.05, mapPx: 2048 };
 /** Clearance either side of the blade's faces in the cut, so neither half's cut face fights the blade's. */
 const BLADE_CLEARANCE_M = 0.0005;
-const HALF_SLIDE_HALF_LIFE_S = 0.18;
+/** Vertices `boxHalves` visits per slice, about a millisecond's work. */
+const BOX_SLICE_VERTICES = 8192;
+/** How long a frame spends finding where the halves come to rest, which takes several before the code warms up. */
+const REST_SLICE_MS = 2;
 /** Side of the plane drawn over a cut face, centered on the cake, larger than any cake's section. */
 const CAP_SIZE_M = 1;
 /** Thickness of the invisible copy of the blade that takes its clicks, since the blade seen edge-on is a hairline. */
@@ -32,35 +27,82 @@ const KNIFE_GRIP_THICKNESS_M = 0.04;
 const HALF_SIDES = [1, -1];
 /** A height above everything, so a clipping plane keeping only what lies above it keeps nothing. */
 const CLIP_ALL_Y_M = 100;
-/** The frame after a round swap draws the new cake, and the one after that warms its halves. */
+/** The frame after the cake's first swap draws it, and the one after that warms its halves. */
 const WARM_DELAY_FRAMES = 2;
+/** Vertical field of view, wide so close objects keep their depth rather than flattening as in a telephoto view. `Orbit`'s distances frame the table for it. */
+const CAMERA_FOV_DEG = 60;
+/**
+ * How far up the canvas the view centers the table, as a share of its height, so the cake's spawn
+ * near the table's front clears the band of the `Cut!` button in the bottom right corner, using
+ * the empty space above the knife.
+ */
+const VIEW_RAISE_SHARE = 0.12;
 
 /**
  * One side of a cut cake, drawn clipped at the knife's plane, whose `normal` points away from the
- * other half, and parted from the other along the level `slide`, a unit vector.
+ * other half, moved from where the cut left it by `fromM` in the cut and by `toM` once parted.
  */
-type Half = { group: THREE.Group; cap: THREE.Mesh; clip: THREE.Plane; side: number; normal: THREE.Vector3; slide: THREE.Vector3 };
+type Half = { group: THREE.Group; cap: THREE.Mesh<THREE.PlaneGeometry, CutFaceMaterial>; frosting: THREE.MeshStandardMaterial; clip: THREE.Plane; side: number; normal: THREE.Vector3; fromM: THREE.Vector3; toM: THREE.Vector3 };
 
-/** Every object the player sees, rebuilt per round from the game's mesh and poses. */
+/**
+ * A round's cake as `Scene.loadCake` builds it ahead of the round swap: its mesh's local vertex
+ * positions, flattened, its geometry, and its texture, already on the GPU, or none for a plain cake.
+ */
+export interface LoadedCake {
+  positions: Float32Array;
+  geometry: THREE.BufferGeometry;
+  texture: THREE.Texture | null;
+}
+
+/**
+ * A cut as a player made it, for the judging reveal to show on the round's cake: the cake's
+ * translation then rotation quaternion, the stand's angle, the knife's tilt and the lowering it
+ * plunged to, and whether the cut divided the cake, which a miss leaves whole.
+ */
+export interface StagedCut {
+  cakePose: readonly number[];
+  standRad: number;
+  tiltRad: number;
+  lowerM: number;
+  isCutThrough: boolean;
+}
+
+/** What `Scene.prepareCut` finds for `Scene.stageCut`: each half's rest, where its label points (the whole cake's first, for a miss), and the whole cake's world bounds. */
+export interface PreparedCut {
+  rests: THREE.Vector3[];
+  labelTops: (THREE.Vector3 | null)[];
+  bounds: THREE.Box3;
+}
+
+/** Every object the player sees, posed from the game, with each round's cake swapped in. */
 export class Scene {
   readonly renderer: THREE.WebGLRenderer;
-  readonly camera = new THREE.PerspectiveCamera(40, 1, 0.01, 20);
+  readonly camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, 1, 0.01, 20);
   private readonly scene = new THREE.Scene();
   private readonly cake = new THREE.Group();
   private readonly knife = new THREE.Group();
-  private readonly stand = new THREE.Group();
+  private readonly stand: THREE.Group;
   /** The point every cut plane passes through. */
   private readonly pivot: THREE.Vector3;
-  private readonly halfSlide = new Spring(0, HALF_SLIDE_HALF_LIFE_S);
-  private halves: Half[] = [];
+  /** How far the halves have parted, from 0 in the cut to 1 at rest, as `setHalfPartShare` sets it. */
+  private partShare = 0;
+  /** The search for where the halves come to rest, run a slice per frame from `showHalves` until it sets each half's `toM`. */
+  private halfRestsJob: SlicedJob<THREE.Vector3[]> | null = null;
+  private readonly halves: Half[];
+  /** The whole cake's mesh, then each half's frosting and stencil counters, all drawing the round's one geometry. */
+  private readonly cakeMeshes: THREE.Mesh[];
+  /** The materials skinned with the round's texture: the whole cake's, then each half's frosting. */
+  private readonly frostings: THREE.MeshStandardMaterial[];
   private readonly halfLabels: HalfLabels;
   /** Where each label in `halfLabels` points before the halves slide, once `showHalfGrams` has found them. */
   private labelTops: (THREE.Vector3 | null)[] | null = null;
-  /** The cake mesh's local vertex positions, flattened. */
-  private cakePositions: Float32Array = new Float32Array();
-  /** In how many frames to draw the hidden halves once, as `warmHalves` describes, or 0 for none. */
-  private framesUntilWarm = 0;
-  private cakeTexture: THREE.Texture | null = null;
+  private cakeLoaded: LoadedCake = { positions: new Float32Array(), geometry: new THREE.BufferGeometry(), texture: null };
+  /**
+   * In how many frames to draw the hidden halves once, as `warmHalves` describes, or 0 for none.
+   * Nothing renders before the first `resetCake`, so the count starts with the first cake.
+   */
+  private framesUntilWarm = WARM_DELAY_FRAMES;
+  private viewShiftPx = 0;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -73,11 +115,20 @@ export class Scene {
     this.renderer.localClippingEnabled = true;
     this.scene.background = new THREE.Color(0x1d1b19);
     this.halfLabels = new HalfLabels(canvas, HALF_SIDES.length);
-    this.addLights();
-    this.addTable();
-    this.buildStand();
-    this.buildKnife();
+    addLights(this.scene, SHADOW);
+    this.scene.add(buildTable(layout, this.renderer.capabilities.getMaxAnisotropy()));
+    this.stand = buildStand(layout);
+    this.stand.userData.pick = "stand";
+    this.knife.add(buildKnife(layout), buildKnifeGrip());
+    this.knife.userData.pick = "knife";
+    const whole = new THREE.Mesh(this.cakeLoaded.geometry, new THREE.MeshStandardMaterial({ color: FROSTING }));
+    whole.castShadow = true;
+    whole.receiveShadow = true;
+    this.cake.add(whole);
     this.cake.userData.pick = "cake";
+    this.halves = HALF_SIDES.map((side, idx) => this.addHalf(side, idx));
+    this.cakeMeshes = [whole, ...this.halves.flatMap((half) => half.group.children as THREE.Mesh[])];
+    this.frostings = [whole.material, ...this.halves.map((half) => half.frosting)];
     this.knife.matrixAutoUpdate = false;
     this.scene.add(this.cake, this.knife, this.stand);
   }
@@ -92,40 +143,71 @@ export class Scene {
   }
 
   /**
-   * Replaces the cake with the game's mesh, whole, skinned with `texture` from `loadCakeTexture`.
-   * Builds the hidden halves now and has the frame after next draw them once, since doing either
-   * when the blade reaches the cake stalls the cut's animation. This call runs between frames, so
-   * drawing them in the next frame would still stack both costs into one hitch over budget.
+   * Builds `game`'s cake for `resetCake` ahead of the round swap and uploads its texture, a step
+   * per frame so no frame runs long and the swap itself only trades references. `game` must stay
+   * alive until this resolves. A cake never given to `resetCake` goes to `disposeLoadedCake`.
    */
-  resetCake(game: Game, texture: THREE.Texture | null): void {
-    this.removeCake();
-    this.cakeTexture = texture;
-    this.cakePositions = game.get_cake_mesh_positions();
-    const geometry = buildCakeGeometry(game, this.cakePositions);
-    const mesh = new THREE.Mesh(geometry, this.buildCakeMaterial());
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    this.cake.add(mesh);
-    this.cake.visible = true;
-    this.halves = HALF_SIDES.map((side, idx) => this.addHalf(geometry, side, idx));
-    this.framesUntilWarm = WARM_DELAY_FRAMES;
+  async loadCake(game: Game): Promise<LoadedCake> {
+    const decoding = decodeCakeTexture(game, this.renderer.capabilities.getMaxAnisotropy());
+    await waitFrames(1);
+    const positions = game.get_cake_mesh_positions();
+    const geometry = buildCakeGeometry(game, positions);
+    // For the cut faces' layers, which start at the cake's bottom.
+    geometry.computeBoundingBox();
+    const texture = await decoding;
+    await waitFrames(1);
+    if (texture) this.renderer.initTexture(texture);
+    await waitFrames(1);
+    return { positions, geometry, texture };
   }
 
-  private removeCake(): void {
-    const roots = [this.cake, ...this.halves.flatMap((half) => [half.group, half.cap])];
-    for (const root of roots) {
-      root.traverse((object) => {
-        if (!(object instanceof THREE.Mesh)) return;
-        object.geometry.dispose();
-        object.material.dispose();
-      });
-    }
-    this.scene.remove(...this.halves.flatMap((half) => [half.group, half.cap]));
-    this.halves = [];
-    this.cake.clear();
-    this.cakeTexture?.dispose();
-    this.halfLabels.hide();
+  /**
+   * Replaces the cake with `cake` from `loadCake`, whole, and takes ownership of it. Every round's
+   * cake draws through the same meshes and materials, so their shaders compile once per page:
+   * three deletes a shader as soon as no material uses it, which recompiled them all every round.
+   */
+  resetCake(cake: LoadedCake): void {
+    disposeLoadedCake(this.cakeLoaded);
+    this.cakeLoaded = cake;
+    for (const mesh of this.cakeMeshes) mesh.geometry = cake.geometry;
+    this.setSkin(cake.texture);
+    this.showWholeCake();
+  }
+
+  /** Shows the cake whole again, without labels, for `sync` to pose. */
+  showWholeCake(): void {
+    this.cake.visible = true;
+    this.hideHalves();
     this.labelTops = null;
+    this.halfRestsJob = null;
+  }
+
+  /** Hides the cake, whole or in halves, until the next `resetCake`, leaving the stand empty. */
+  hideCake(): void {
+    this.cake.visible = false;
+    this.hideHalves();
+  }
+
+  private hideHalves(): void {
+    for (const half of this.halves) {
+      half.group.position.set(0, 0, 0);
+      for (const mesh of [...half.group.children, half.cap]) mesh.visible = false;
+    }
+    this.halfLabels.hide();
+  }
+
+  /**
+   * Skins every frosting with `texture`, or plain frosting for none. Switching between the two
+   * needs other shaders, so the halves warm up again.
+   */
+  private setSkin(texture: THREE.Texture | null): void {
+    const isSwitched = (this.frostings[0].map !== null) !== (texture !== null);
+    for (const material of this.frostings) {
+      material.map = texture;
+      material.color.set(texture ? UNTINTED : FROSTING);
+      if (isSwitched) material.needsUpdate = true;
+    }
+    if (isSwitched) this.framesUntilWarm = WARM_DELAY_FRAMES;
   }
 
   /**
@@ -133,12 +215,16 @@ export class Scene {
    * inside through the stencil buffer, which works for any closed mesh without building cap
    * geometry.
    */
-  private addHalf(geometry: THREE.BufferGeometry, side: number, idx: number): Half {
+  private addHalf(side: number, idx: number): Half {
+    const geometry = this.cakeLoaded.geometry;
     const clip = new THREE.Plane();
     const group = new THREE.Group();
-    const frosting = new THREE.Mesh(geometry, this.buildCakeMaterial({ clippingPlanes: [clip], clipShadows: true }));
-    frosting.castShadow = true;
-    group.add(frosting);
+    // Both sides cast shadows: the half is open where its cut face is drawn, which the shadow pass
+    // does not see, so its back faces alone let light through where the cut faces away from it.
+    const frosting = new THREE.MeshStandardMaterial({ color: FROSTING, clippingPlanes: [clip], clipShadows: true, shadowSide: THREE.DoubleSide });
+    const frostingMesh = new THREE.Mesh(geometry, frosting);
+    frostingMesh.castShadow = true;
+    group.add(frostingMesh);
     for (const [faces, stencilOp] of [
       [THREE.BackSide, THREE.IncrementWrapStencilOp],
       [THREE.FrontSide, THREE.DecrementWrapStencilOp],
@@ -148,17 +234,20 @@ export class Scene {
       group.add(counter);
     }
     const cap = new THREE.Mesh(new THREE.PlaneGeometry(CAP_SIZE_M, CAP_SIZE_M), buildCapMaterial());
+    cap.receiveShadow = true;
     cap.renderOrder = idx + 1.5;
     cap.onAfterRender = (renderer) => renderer.clearStencil();
     // Hide the meshes, not the group: a raycast skips only meshes hidden themselves.
     for (const mesh of [...group.children, cap]) mesh.visible = false;
     this.scene.add(group, cap);
-    return { group, cap, clip, side, normal: new THREE.Vector3(), slide: new THREE.Vector3() };
+    return { group, cap, frosting, clip, side, normal: new THREE.Vector3(), fromM: new THREE.Vector3(), toM: new THREE.Vector3() };
   }
 
   /**
-   * Draws the hidden halves once, clipped away entirely, so every shader they need compiles now.
-   * `renderer.compile` would miss the shadow pass's clipped depth shader.
+   * Draws the hidden halves once, clipped away entirely, so every shader they need compiles now
+   * rather than when the blade reaches the cake, which would stall the cut's animation. It waits
+   * two frames after the first cake swaps in, so it lands on neither the swap nor the cake's first
+   * draw. `renderer.compile` would miss the shadow pass's clipped depth shader.
    */
   private warmHalves(): void {
     this.framesUntilWarm = 0;
@@ -174,45 +263,66 @@ export class Scene {
     this.cake.position.set(pose[0], pose[1], pose[2]);
     this.cake.quaternion.set(pose[3], pose[4], pose[5], pose[6]);
     this.stand.rotation.y = game.get_stand_angle_rad();
-    this.placeKnife(game, game.get_knife_pose()[1], 0);
+    const [tiltRad, lowerM] = game.get_knife_pose();
+    placeKnife(this.knife, this.layout, tiltRad, lowerM, 0);
   }
 
-  /**
-   * Draws the knife lowered by `lowerM` within its plane, rocked by `rockRad` as its curved edge
-   * rolls along the line it rests on without slipping, as a mezzaluna rocks through a cut.
-   */
+  /** Draws `game`'s knife lowered by `lowerM` and rocked by `rockRad`, as `props.ts`'s `placeKnife` does. */
   placeKnife(game: Game, lowerM: number, rockRad: number): void {
-    const f = game.get_knife_frame();
-    const edge = new THREE.Vector3(f[0], f[1], f[2]);
-    const down = new THREE.Vector3(f[3], f[4], f[5]);
-    const up = down.clone().negate();
-    const edgeMiddle = this.pivot.clone().addScaledVector(down, lowerM);
-    const arcCenter = new THREE.Vector3(0, this.layout.blade_arc_radius_m, 0);
-    const rollM = -this.layout.blade_arc_radius_m * rockRad;
-    const rock = new THREE.Matrix4()
-      .makeTranslation(arcCenter.clone().setX(rollM))
-      .multiply(new THREE.Matrix4().makeRotationZ(rockRad))
-      .multiply(new THREE.Matrix4().makeTranslation(arcCenter.clone().negate()));
-    this.knife.matrix.makeBasis(edge, up, edge.clone().cross(up)).setPosition(edgeMiddle).multiply(rock);
-    this.knife.matrixWorldNeedsUpdate = true;
+    placeKnife(this.knife, this.layout, game.get_knife_pose()[0], lowerM, rockRad);
   }
 
   /**
    * Swaps the whole cake for its two halves along the knife's plane, apart by just the blade's
-   * thickness until `partHalves`, so the blade shows in the cut as it plunges.
+   * thickness until `setHalfPartShare` parts them, so the blade shows in the cut as it plunges.
    */
   showHalves(game: Game): void {
+    const normal = calcKnifeNormal(game.get_knife_pose()[0]);
+    this.splitHalves(normal);
+    const pose = new THREE.Matrix4().compose(this.cake.position, this.cake.quaternion, new THREE.Vector3(1, 1, 1));
+    this.halfRestsJob = calcHalfRests(this.cakeLoaded.positions, pose, this.pivot, normal, this.calcBladeClearSlideM(normal), this.calcSupports());
+  }
+
+  /**
+   * Finds what `stageCut` needs to show `cut` on the round's cake without a long frame: where its
+   * halves come to rest, where their labels point, and the whole cake's bounds, a slice per `next()`.
+   */
+  *prepareCut(cut: StagedCut): SlicedJob<PreparedCut> {
+    const pose = calcCakePose(cut.cakePose);
+    const normal = cut.isCutThrough ? calcKnifeNormal(cut.tiltRad) : null;
+    const positions = this.cakeLoaded.positions;
+    const boxes = yield* boxHalves(positions, pose, this.pivot, normal);
+    const rests = normal ? yield* calcHalfRests(positions, pose, this.pivot, normal, this.calcBladeClearSlideM(normal), this.calcSupports()) : HALF_SIDES.map(() => new THREE.Vector3());
+    return { rests, labelTops: boxes.map(findBoxTop), bounds: boxes[0].clone().union(boxes[1]) };
+  }
+
+  /**
+   * Shows `cut` as it was made, for the judging reveal to part with `setHalfPartShare`: the
+   * stand, the cake in halves still together, or whole for a cut that missed, and the knife
+   * plunged in it, with `prepared` from `prepareCut`. The labels show once `showHalfGrams` asks.
+   */
+  stageCut(cut: StagedCut, prepared: PreparedCut): void {
+    this.cake.position.fromArray(cut.cakePose, 0);
+    this.cake.quaternion.fromArray(cut.cakePose, 3);
+    this.stand.rotation.y = cut.standRad;
+    placeKnife(this.knife, this.layout, cut.tiltRad, cut.lowerM, 0);
+    this.showWholeCake();
+    this.labelTops = prepared.labelTops;
+    if (!cut.isCutThrough) return;
+    this.splitHalves(calcKnifeNormal(cut.tiltRad));
+    this.halves.forEach((half, idx) => half.toM.copy(prepared.rests[idx]));
+  }
+
+  /** Swaps the whole cake, posed as it is, for its two halves along the plane through the pivot of unit `normal`, together. */
+  private splitHalves(normal: THREE.Vector3): void {
     // Their own drawing compiles whatever a pending warm-up would have.
     this.framesUntilWarm = 0;
-    const f = game.get_knife_frame();
-    const normal = new THREE.Vector3(f[6], f[7], f[8]);
-    const level = normal.clone().setY(0);
-    // A level slide moves a half off the tilted plane by only this share of the slide.
-    const offPlanePerSlide = level.length();
-    this.halfSlide.snap((this.layout.blade_thickness_m / 2 + BLADE_CLEARANCE_M) / offPlanePerSlide);
+    const level = normal.clone().setY(0).normalize();
+    this.partShare = 0;
     for (const half of this.halves) {
       half.normal.copy(normal).multiplyScalar(half.side);
-      half.slide.copy(level).normalize().multiplyScalar(half.side);
+      half.fromM.copy(level).multiplyScalar(half.side * this.calcBladeClearSlideM(normal));
+      half.toM.copy(half.fromM);
       for (const mesh of half.group.children) {
         mesh.position.copy(this.cake.position);
         mesh.quaternion.copy(this.cake.quaternion);
@@ -223,29 +333,38 @@ export class Scene {
     this.cake.visible = false;
   }
 
-  /** The cake's texture, mipmapped and as sharp at grazing angles as the GPU allows, or none for a plain cake. */
-  async loadCakeTexture(game: Game): Promise<THREE.Texture | null> {
-    const file = game.get_cake_texture();
-    if (file.length === 0) return null;
-    const bitmap = await createImageBitmap(new Blob([new Uint8Array(file)], { type: "image/webp" }), {
-      colorSpaceConversion: "none",
-      premultiplyAlpha: "none",
-    });
-    const texture = new THREE.Texture(bitmap);
-    texture.flipY = false;
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
-    texture.needsUpdate = true;
-    return texture;
+  /** The level slide that moves a half off the knife's plane, of unit `normal`, just clear of the blade's face. */
+  private calcBladeClearSlideM(normal: THREE.Vector3): number {
+    return (this.layout.blade_thickness_m / 2 + BLADE_CLEARANCE_M) / Math.hypot(normal.x, normal.z);
   }
 
-  private buildCakeMaterial(parameters: THREE.MeshStandardMaterialParameters = {}): THREE.Material {
-    const skin = this.cakeTexture ? { map: this.cakeTexture } : { color: FROSTING };
-    return new THREE.MeshStandardMaterial({ ...skin, ...parameters });
+  /**
+   * Parts the halves from `showHalves` or `stageCut` by `share`, from 0 together to 1 where each
+   * comes to rest, as `calcHalfRests` chose, which `hasHalfRests` tells has been found.
+   */
+  setHalfPartShare(share: number): void {
+    this.partShare = share;
   }
 
-  partHalves(): void {
-    this.halfSlide.target = HALF_SLIDE_M;
+  hasHalfRests(): boolean {
+    return this.halfRestsJob === null;
+  }
+
+  /** Runs `halfRestsJob` for up to `REST_SLICE_MS`, setting each half's rest once it is done. */
+  private stepHalfRests(): void {
+    const job = this.halfRestsJob;
+    if (!job) return;
+    const endMs = performance.now() + REST_SLICE_MS;
+    let step = job.next();
+    while (!step.done && performance.now() < endMs) step = job.next();
+    if (!step.done) return;
+    this.halves.forEach((half, idx) => half.toM.copy(step.value[idx]));
+    this.halfRestsJob = null;
+  }
+
+  private calcSupports(): Supports {
+    const layout = this.layout;
+    return { tableHalfXM: layout.table_half_x_m, tableHalfZM: layout.table_half_z_m, plateRadiusM: layout.stand_radius_m, plateTopYM: layout.stand_top_y_m, standParts: get_stand_parts() };
   }
 
   /**
@@ -259,16 +378,27 @@ export class Scene {
     this.halfLabels.show(grams.map((g, idx) => (tops[idx] ? `${g} g` : null)));
   }
 
-  render(dtS: number): void {
+  /**
+   * Compiles the shaders of every mesh, the hidden halves' included, without holding the page
+   * where the browser compiles in parallel, so a draw after this resolves compiles only the shadow
+   * pass's, which this skips. A later skin with or without a texture needs other shaders.
+   */
+  async compile(): Promise<void> {
+    await this.renderer.compileAsync(this.scene, this.camera);
+  }
+
+  render(): void {
     if (this.framesUntilWarm > 0 && --this.framesUntilWarm === 0) this.warmHalves();
-    const slideM = this.halfSlide.step(dtS);
+    this.stepHalfRests();
     for (const half of this.halves) {
       if (!half.cap.visible) continue;
-      half.group.position.copy(half.slide).multiplyScalar(slideM);
+      half.group.position.lerpVectors(half.fromM, half.toM, this.partShare);
       const cutPoint = this.pivot.clone().add(half.group.position);
       half.clip.setFromNormalAndCoplanarPoint(half.normal, cutPoint);
       half.clip.projectPoint(this.cake.position.clone().add(half.group.position), half.cap.position);
       half.cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), half.normal.clone().negate());
+      half.group.updateMatrixWorld();
+      half.cap.material.setCake(half.group.children[0], this.cakeLoaded.geometry.boundingBox!.min.y);
     }
     this.fitCanvas();
     this.renderer.render(this.scene, this.camera);
@@ -283,116 +413,52 @@ export class Scene {
   private findLabelTops(): (THREE.Vector3 | null)[] {
     const isSplit = this.halves.some((half) => half.cap.visible);
     const pose = new THREE.Matrix4().compose(this.cake.position, this.cake.quaternion, new THREE.Vector3(1, 1, 1));
-    const boxes = this.halves.map(() => new THREE.Box3());
-    const point = new THREE.Vector3();
-    const fromPivot = new THREE.Vector3();
-    for (let i = 0; i < this.cakePositions.length; i += 3) {
-      point.fromArray(this.cakePositions, i).applyMatrix4(pose);
-      const idx = !isSplit || fromPivot.subVectors(point, this.pivot).dot(this.halves[0].normal) >= 0 ? 0 : 1;
-      boxes[idx].expandByPoint(point);
-    }
-    return boxes.map((box) => (box.isEmpty() ? null : box.getCenter(new THREE.Vector3()).setY(box.max.y)));
+    return finishJob(boxHalves(this.cakeLoaded.positions, pose, this.pivot, isSplit ? this.halves[0].normal : null)).map(findBoxTop);
+  }
+
+  /**
+   * Centers the camera's view `shiftPx` left of the canvas's middle, keeping its vertical field of
+   * view, so the table centers in the part of the screen the opponents' tiles leave uncovered.
+   */
+  setViewShiftPx(shiftPx: number): void {
+    if (shiftPx === this.viewShiftPx) return;
+    this.viewShiftPx = shiftPx;
+    this.fitCamera();
   }
 
   private fitCanvas(): void {
     const canvas = this.renderer.domElement;
     if (canvas.width === canvas.clientWidth && canvas.height === canvas.clientHeight) return;
     this.renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
-    this.camera.aspect = canvas.clientWidth / canvas.clientHeight;
-    this.camera.updateProjectionMatrix();
+    this.fitCamera();
   }
 
-  /** A warm key light low enough to the side that it is plainly not overhead, and a cool unshadowed fill from the far side. */
-  private addLights(): void {
-    this.scene.add(new THREE.HemisphereLight(0xfff4e0, 0x2a2420, 0.7));
-    const fill = new THREE.DirectionalLight(0x9fb8ff, 0.9);
-    fill.position.set(-1.2, 0.9, -0.9);
-    this.scene.add(fill);
-    const sun = new THREE.DirectionalLight(0xfff1dc, 2.4);
-    sun.position.set(1.7, 1.2, 0.6);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.bias = -0.0005;
-    const extent = 1.05;
-    Object.assign(sun.shadow.camera, { left: -extent, right: extent, top: extent, bottom: -extent, near: 0.5, far: 5 });
-    this.scene.add(sun);
+  /**
+   * Fits the camera to the canvas as a window onto a view wider by twice the shift and taller by
+   * twice the raise, at the larger view's bottom right corner, so the table sits left and up of
+   * the canvas's middle.
+   */
+  private fitCamera(): void {
+    const { width, height } = this.renderer.domElement;
+    const shiftPx = this.viewShiftPx;
+    const raisePx = Math.round(height * VIEW_RAISE_SHARE);
+    const fullHeightPx = height + 2 * raisePx;
+    // The larger view spreads the field of view over its full height, so zooming out by as much
+    // keeps the window's field of view, and with it how far a drag moves, as without the raise.
+    this.camera.zoom = height / fullHeightPx;
+    this.camera.setViewOffset(width + 2 * shiftPx, fullHeightPx, 2 * shiftPx, 2 * raisePx, width, height);
   }
+}
 
-  private addTable(): void {
-    const { table_half_x_m: halfX, table_half_z_m: halfZ } = this.layout;
-    const wood = new THREE.MeshStandardMaterial({ color: 0x7a5236, roughness: 0.8 });
-    const top = new THREE.Mesh(new THREE.BoxGeometry(2 * halfX, TABLE_THICKNESS_M, 2 * halfZ).translate(0, -TABLE_THICKNESS_M / 2, 0), wood);
-    top.castShadow = true;
-    top.receiveShadow = true;
-    this.scene.add(top);
-    for (const [sx, sz] of [
-      [1, 1],
-      [1, -1],
-      [-1, 1],
-      [-1, -1],
-    ]) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(LEG_SIDE_M, LEG_LEN_M, LEG_SIDE_M), wood);
-      leg.position.set(sx * (halfX - LEG_INSET_M), -TABLE_THICKNESS_M - LEG_LEN_M / 2, sz * (halfZ - LEG_INSET_M));
-      leg.castShadow = true;
-      this.scene.add(leg);
-    }
-  }
-
-  /** Plate, column, and base, with beads around the rim so its turning shows. */
-  private buildStand(): void {
-    const layout = this.layout;
-    const ceramic = new THREE.MeshStandardMaterial({ color: 0xf2efe8, roughness: 0.35 });
-    const parts = get_stand_parts();
-    for (let i = 0; i < parts.length; i += 3) {
-      const [radiusM, y0M, y1M] = parts.slice(i, i + 3);
-      const part = new THREE.Mesh(new THREE.CylinderGeometry(radiusM, radiusM, y1M - y0M, 64).translate(0, (y0M + y1M) / 2, 0), ceramic);
-      part.castShadow = true;
-      part.receiveShadow = true;
-      this.stand.add(part);
-    }
-    const beadRadiusM = layout.stand_plate_thickness_m * 0.45;
-    const bead = new THREE.SphereGeometry(beadRadiusM, 12, 8);
-    const beadMaterial = new THREE.MeshStandardMaterial({ color: 0xc9a86a, roughness: 0.4, metalness: 0.5 });
-    for (let i = 0; i < RIM_BEAD_COUNT; i += 1) {
-      const angle = (2 * Math.PI * i) / RIM_BEAD_COUNT;
-      const mesh = new THREE.Mesh(bead, beadMaterial);
-      mesh.position.set(Math.cos(angle) * layout.stand_radius_m, layout.stand_top_y_m - layout.stand_plate_thickness_m / 2, Math.sin(angle) * layout.stand_radius_m);
-      this.stand.add(mesh);
-    }
-    this.stand.userData.pick = "stand";
-  }
-
-  /** A mezzaluna: a crescent blade from the core's outline, with an upright handle at each end. */
-  private buildKnife(): void {
-    const layout = this.layout;
-    const outline = get_blade_outline();
-    const shape = new THREE.Shape();
-    shape.moveTo(outline[0], outline[1]);
-    for (let i = 2; i < outline.length; i += 2) shape.lineTo(outline[i], outline[i + 1]);
-    shape.closePath();
-    const blade = new THREE.Mesh(
-      new THREE.ExtrudeGeometry(shape, { depth: layout.blade_thickness_m, bevelEnabled: false }).translate(0, 0, -layout.blade_thickness_m / 2),
-      new THREE.MeshStandardMaterial({ color: 0xcfd6dc, metalness: 0.8, roughness: 0.3, side: THREE.DoubleSide }),
-    );
-    blade.castShadow = true;
-    const grip = new THREE.Mesh(
-      new THREE.ExtrudeGeometry(shape, { depth: KNIFE_GRIP_THICKNESS_M, bevelEnabled: false }).translate(0, 0, -KNIFE_GRIP_THICKNESS_M / 2),
-      new THREE.MeshBasicMaterial({ visible: false }),
-    );
-    blade.userData.pick = "knife";
-    grip.userData.pick = "knife";
-    this.knife.add(blade, grip);
-    const centers = get_handle_centers();
-    const wood = new THREE.MeshStandardMaterial({ color: 0x5b3a29, roughness: 0.7 });
-    const handle = new THREE.CylinderGeometry(layout.handle_radius_m, layout.handle_radius_m, layout.handle_len_m, 24);
-    for (let i = 0; i < centers.length; i += 3) {
-      const mesh = new THREE.Mesh(handle, wood);
-      mesh.position.set(centers[i], centers[i + 1], centers[i + 2]);
-      mesh.castShadow = true;
-      mesh.userData.pick = "knife";
-      this.knife.add(mesh);
-    }
-  }
+/** An invisible thick copy of the core's blade outline, to take the knife's clicks. */
+function buildKnifeGrip(): THREE.Mesh {
+  const outline = get_blade_outline();
+  const shape = new THREE.Shape();
+  shape.moveTo(outline[0], outline[1]);
+  for (let i = 2; i < outline.length; i += 2) shape.lineTo(outline[i], outline[i + 1]);
+  shape.closePath();
+  const geometry = new THREE.ExtrudeGeometry(shape, { depth: KNIFE_GRIP_THICKNESS_M, bevelEnabled: false }).translate(0, 0, -KNIFE_GRIP_THICKNESS_M / 2);
+  return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ visible: false }));
 }
 
 /** Counts, per pixel, the half's surfaces behind the cut: nonzero exactly where the cut face shows. */
@@ -411,10 +477,9 @@ function buildStencilCounter(faces: THREE.Side, stencilOp: THREE.StencilOp, clip
   });
 }
 
-/** Sponge drawn only where the stencil count marks the cut face, resetting the count as it goes. */
-function buildCapMaterial(): THREE.Material {
-  return new THREE.MeshStandardMaterial({
-    color: SPONGE,
+/** Sponge and buttercream drawn only where the stencil count marks the cut face, resetting the count as it goes. */
+function buildCapMaterial(): CutFaceMaterial {
+  return new CutFaceMaterial({
     side: THREE.DoubleSide,
     stencilWrite: true,
     stencilRef: 0,
@@ -425,18 +490,45 @@ function buildCapMaterial(): THREE.Material {
   });
 }
 
+/** Frees a cake `Scene.loadCake` built that never went to `Scene.resetCake`. */
+export function disposeLoadedCake(cake: LoadedCake): void {
+  cake.geometry.dispose();
+  cake.texture?.dispose();
+}
+
+/** Runs `job` to its end at once, returning its result. */
+export function finishJob<T>(job: SlicedJob<T>): T {
+  let step = job.next();
+  while (!step.done) step = job.next();
+  return step.value;
+}
+
+/** The world matrix of a cake at `cakePose`, its translation then rotation quaternion. */
+function calcCakePose(cakePose: readonly number[]): THREE.Matrix4 {
+  const position = new THREE.Vector3().fromArray(cakePose, 0);
+  const rotation = new THREE.Quaternion().fromArray(cakePose, 3);
+  return new THREE.Matrix4().compose(position, rotation, new THREE.Vector3(1, 1, 1));
+}
+
 /**
- * The cake's mesh, each triangle with its own corners so texture seams stay sharp, shaded smoothly
- * but for creases. The core finds the normals from the mesh's vertices, since three's
- * `toCreasedNormals` matches corners only to the centimeter here and takes seconds on a dense cake.
+ * The world bounds of the cake's vertices `positions` placed by `pose`, on the `HALF_SIDES[0]`
+ * side of the plane through `pivot` of unit `normal` and then the other's, or all in the first
+ * and none in the second with no plane.
  */
-function buildCakeGeometry(game: Game, positions: Float32Array): THREE.BufferGeometry {
-  const indexed = new THREE.BufferGeometry();
-  indexed.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  indexed.setIndex(new THREE.BufferAttribute(game.get_cake_mesh_triangles(), 1));
-  const corners = indexed.toNonIndexed();
-  const uvs = game.get_cake_corner_uvs();
-  if (uvs.length > 0) corners.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
-  corners.setAttribute("normal", new THREE.BufferAttribute(game.calc_cake_corner_normals(CREASE_ANGLE_RAD), 3));
-  return corners;
+function* boxHalves(positions: Float32Array, pose: THREE.Matrix4, pivot: THREE.Vector3, normal: THREE.Vector3 | null): SlicedJob<THREE.Box3[]> {
+  const boxes = HALF_SIDES.map(() => new THREE.Box3());
+  const point = new THREE.Vector3();
+  const fromPivot = new THREE.Vector3();
+  for (let i = 0; i < positions.length; i += 3) {
+    if (i % (3 * BOX_SLICE_VERTICES) === 0) yield;
+    point.fromArray(positions, i).applyMatrix4(pose);
+    const idx = !normal || fromPivot.subVectors(point, pivot).dot(normal) >= 0 ? 0 : 1;
+    boxes[idx].expandByPoint(point);
+  }
+  return boxes;
+}
+
+/** The top middle of `box`, where a label over what it bounds points, or none for an empty box. */
+function findBoxTop(box: THREE.Box3): THREE.Vector3 | null {
+  return box.isEmpty() ? null : box.getCenter(new THREE.Vector3()).setY(box.max.y);
 }

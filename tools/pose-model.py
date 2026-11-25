@@ -34,6 +34,9 @@ _COMPONENT_DTYPES = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uin
 _TYPE_WIDTHS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
 # Extensions that store vertex data where a plain accessor read cannot find it.
 _COMPRESSION_EXTENSIONS = {"KHR_draco_mesh_compression", "EXT_meshopt_compression"}
+# A turned normal or tangent shorter than this share of the length its blend's scale gives it
+# belongs to a vertex the blend collapsed.
+_COLLAPSED_RATIO = 1e-9
 
 
 def _decode_glb(data: bytes) -> tuple[dict, bytes]:
@@ -71,6 +74,8 @@ def _validate_supported(doc: dict) -> None:
         raise click.ClickException(f"compressed vertex data is not supported: {sorted(compressed)}")
     if not doc.get("animations"):
         raise click.ClickException("the model has no animation to pose")
+    if not 0 <= doc.get("scene", 0) < len(doc.get("scenes", [])):
+        raise click.ClickException("the model has no scene to pose")
 
 
 def _read_accessor(doc: dict, binary: bytes, accessor_idx: int) -> np.ndarray:
@@ -98,13 +103,14 @@ def _read_accessor(doc: dict, binary: bytes, accessor_idx: int) -> np.ndarray:
 def _append_accessor(doc: dict, out: bytearray, values: np.ndarray, accessor_type: str) -> int:
     """Appends float rows to the output buffer as a new accessor and returns its index."""
     out.extend(b"\0" * (-len(out) % 4))
-    data = np.ascontiguousarray(values, dtype=np.float32).tobytes()
+    stored = np.ascontiguousarray(values, dtype=np.float32)
+    data = stored.tobytes()
     doc["bufferViews"].append({"buffer": 0, "byteOffset": len(out), "byteLength": len(data)})
     out.extend(data)
     doc["buffers"][0]["byteLength"] = len(out)
     accessor = {"bufferView": len(doc["bufferViews"]) - 1, "componentType": _FLOAT, "count": len(values), "type": accessor_type}
     if accessor_type == "VEC3":
-        accessor |= {"min": values.min(axis=0).tolist(), "max": values.max(axis=0).tolist()}
+        accessor |= {"min": stored.min(axis=0).tolist(), "max": stored.max(axis=0).tolist()}
     doc["accessors"].append(accessor)
     return len(doc["accessors"]) - 1
 
@@ -203,22 +209,44 @@ def _calc_vertex_skins(doc: dict, binary: bytes, attributes: dict, joint_matrice
     return blended
 
 
+def _calc_normal_matrices(linear: np.ndarray, is_mirrored: np.ndarray) -> np.ndarray:
+    """The matrices that turn normals as `linear` turns positions: each one's cofactor matrix, its
+    inverse transpose times its determinant, which stays defined where it has no inverse, negated
+    where it mirrors so normals keep facing out."""
+    columns = linear.transpose(0, 2, 1)
+    crosses = [np.cross(columns[:, 1], columns[:, 2]), np.cross(columns[:, 2], columns[:, 0]), np.cross(columns[:, 0], columns[:, 1])]
+    return np.stack(crosses, axis=2) * np.where(is_mirrored, -1.0, 1.0)[:, None, None]
+
+
+def _turn_directions(matrices: np.ndarray, directions: np.ndarray, full_lengths: np.ndarray) -> np.ndarray:
+    """Each direction turned by its matrix, as a unit vector, or left as it is where the turned one
+    is under `_COLLAPSED_RATIO` of its `full_lengths`: the blend collapsed that vertex to a point or
+    a line, such as a joint scaled to nothing to hide a part, so it has no direction of its own."""
+    turned = np.einsum("vij,vj->vi", matrices, directions)
+    lengths = np.linalg.norm(turned, axis=1, keepdims=True)
+    is_collapsed = lengths <= _COLLAPSED_RATIO * full_lengths[:, None]
+    return np.where(is_collapsed, directions, turned / np.where(is_collapsed, 1.0, lengths))
+
+
 def _pose_skinned_primitive(doc: dict, binary: bytes, out: bytearray, primitive: dict, joint_matrices: np.ndarray) -> None:
     attributes = primitive["attributes"]
     if primitive.get("targets"):
         raise click.ClickException("morph targets are not supported")
     skins = _calc_vertex_skins(doc, binary, attributes, joint_matrices)
     linear = skins[:, :3, :3]
+    is_mirrored = np.linalg.det(linear) < 0
+    squared_scales = np.einsum("vij,vij->v", linear, linear)
     positions = _read_accessor(doc, binary, attributes["POSITION"])
     attributes["POSITION"] = _append_accessor(doc, out, np.einsum("vij,vj->vi", linear, positions) + skins[:, :3, 3], "VEC3")
     if "NORMAL" in attributes:
-        normals = np.einsum("vji,vj->vi", np.linalg.inv(linear), _read_accessor(doc, binary, attributes["NORMAL"]))
-        attributes["NORMAL"] = _append_accessor(doc, out, normals / np.linalg.norm(normals, axis=1, keepdims=True), "VEC3")
+        normals = _turn_directions(_calc_normal_matrices(linear, is_mirrored), _read_accessor(doc, binary, attributes["NORMAL"]), squared_scales)
+        attributes["NORMAL"] = _append_accessor(doc, out, normals, "VEC3")
     if "TANGENT" in attributes:
         tangents = _read_accessor(doc, binary, attributes["TANGENT"])
-        directions = np.einsum("vij,vj->vi", linear, tangents[:, :3])
-        directions /= np.linalg.norm(directions, axis=1, keepdims=True)
-        attributes["TANGENT"] = _append_accessor(doc, out, np.column_stack([directions, tangents[:, 3]]), "VEC4")
+        directions = _turn_directions(linear, tangents[:, :3], np.sqrt(squared_scales))
+        # A mirroring blend reverses which way the bitangent, normal x tangent, points.
+        handedness = np.where(is_mirrored, -tangents[:, 3], tangents[:, 3])
+        attributes["TANGENT"] = _append_accessor(doc, out, np.column_stack([directions, handedness]), "VEC4")
     for name in [name for name in attributes if name.startswith(("JOINTS_", "WEIGHTS_"))]:
         del attributes[name]
 
@@ -276,6 +304,8 @@ def pose_model(source: bytes, time_s: float, animation_idx: int) -> bytes:
     doc["scene"] = 0
     for key in ("skins", "animations"):
         doc.pop(key, None)
+    for node in doc["nodes"]:
+        node.pop("skin", None)
     return _encode_glb(doc, out)
 
 

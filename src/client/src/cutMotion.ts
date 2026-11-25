@@ -3,7 +3,8 @@
  * its curved edge and settles. The player's own cut and every opponent's play the same motion.
  */
 
-const DESCEND_S = 0.4;
+/** How long the knife takes to sweep down and land, where the chop sounds. */
+export const DESCEND_S = 0.4;
 const ROCK_S = 1.2;
 /** How far the knife rocks either way through the cut, a gentle mezzaluna rock. */
 const ROCK_RAD = 0.36;

@@ -3,11 +3,12 @@ import { Spring } from "./spring";
 
 const START_YAW_RAD = 0.5;
 const START_PITCH_RAD = 0.5;
-const START_DISTANCE_M = 1.6;
+/** Distances suit the scene camera's field of view: the start frames the table, the closest the cake with the knife resting over it. */
+const START_DISTANCE_M = 1.15;
 const MIN_PITCH_RAD = 0.08;
 const MAX_PITCH_RAD = 1.5;
-const MIN_DISTANCE_M = 0.5;
-const MAX_DISTANCE_M = 3.5;
+const MIN_DISTANCE_M = 0.38;
+const MAX_DISTANCE_M = 2.2;
 const DRAG_RAD_PER_PX = 0.006;
 const KEY_RAD_PER_S = 1.6;
 const ZOOM_PER_WHEEL_DELTA = 0.0012;
@@ -39,12 +40,14 @@ export class Orbit {
   }
 
   /**
-   * Table directions that follow the mouse on screen: rightward, then away from the camera,
-   * lengthened to undo the foreshortening of a tilted view.
+   * Table directions that follow the mouse on screen at `point`: rightward, then away from the
+   * camera, lengthened to undo the foreshortening of the line of sight to `point`, which a wide
+   * view tilts well away from the camera's own pitch near the screen's edges.
    */
-  getGroundAxes(): [THREE.Vector3, THREE.Vector3] {
+  getGroundAxes(point: THREE.Vector3): [THREE.Vector3, THREE.Vector3] {
     const yaw = this.yaw.value;
-    const stretch = 1 / Math.max(Math.sin(this.pitch.value), MIN_FORESHORTENING);
+    const sightSinElevation = (this.camera.position.y - point.y) / this.camera.position.distanceTo(point);
+    const stretch = 1 / Math.max(sightSinElevation, MIN_FORESHORTENING);
     return [new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw)), new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)).multiplyScalar(stretch)];
   }
 

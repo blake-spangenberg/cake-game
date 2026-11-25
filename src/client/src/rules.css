@@ -1,0 +1,38 @@
+/* Two by two, which reads in step order at any width and never leaves one panel alone on a row. */
+.rules {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rules figure {
+  margin: 0;
+}
+
+.rules img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+.rules figcaption {
+  margin-top: 6px;
+  font-size: 0.9em;
+  line-height: 1.35;
+}
+
+/* A small copy of the Cut! button: the bakery script in white on its red. */
+.rules-cut {
+  padding: 0 0.4em 0.05em;
+  border-radius: 0.7em;
+  background: #c0392b;
+  color: #fff;
+  font-family: "Pacifico", cursive;
+  font-size: 1.05em;
+  line-height: 1;
+  white-space: nowrap;
+}

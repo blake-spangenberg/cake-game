@@ -1,7 +1,7 @@
 //! The hand that carries the cake: grabbing, steering, and stopping it against solids.
 
 use rapier3d::glamx::DVec3;
-use rapier3d::parry::query::ShapeCastOptions;
+use rapier3d::parry::query::{ShapeCastHit, ShapeCastOptions};
 use rapier3d::prelude::*;
 
 use super::{DT_S, FREE_ANGULAR_DAMPING, FREE_LINEAR_DAMPING, Fnv1a, World};
@@ -33,13 +33,15 @@ const HAND_SWEEP_CLEARANCE_M: f32 = 0.002;
 pub(super) struct Grip {
     joint: ImpulseJointHandle,
     grab_at: [i32; 3],
+    /// Where the hand holds the cake, in the cake's own coordinates.
+    local_anchor: Vector,
     /// The hand's height while a cake taken off the stand still reaches over it.
     stand_hold_y_m: Option<f64>,
 }
 
 impl Grip {
     /// Hashes whether a cake is held, and where, so a divergence in grip shows the tick it happens.
-    pub(super) fn write_hash(grip: Option<&Grip>, hash: &mut Fnv1a) {
+    pub(super) fn write_hash(grip: Option<&Self>, hash: &mut Fnv1a) {
         let Some(grip) = grip else {
             hash.write(&[0]);
             return;
@@ -88,7 +90,7 @@ impl World {
         };
         self.physics.remove_impulse_joint(grip.joint);
         set_damping(&mut self.physics.bodies[self.cake], FREE_LINEAR_DAMPING, FREE_ANGULAR_DAMPING);
-        self.set_knife_solid(false);
+        self.set_held_colliders_enabled(false);
     }
 
     /// Whether the cake sits on the stand's plate, judged by its shape rather than its contacts,
@@ -116,7 +118,7 @@ impl World {
         if let Some(hold_y_m) = grip.stand_hold_y_m {
             return Some(hold_y_m);
         }
-        let hand_y_m = self.physics.bodies[self.hand].translation().y as f64;
+        let hand_y_m = f64::from(self.physics.bodies[self.hand].translation().y);
         Some(hand_y_m + self.calc_support_y_m() + CARRY_CLEARANCE_M - self.calc_lowest_y_m())
     }
 
@@ -144,6 +146,7 @@ impl World {
 
     /// How far the cake's bounding box lies outside the stand's rim, seen from above, or a
     /// negative amount where it reaches over the plate.
+    #[expect(clippy::similar_names, reason = "x and z name the axes")]
     fn calc_stand_gap_m(&self) -> f64 {
         let (mut min, mut max) = (DVec3::INFINITY, DVec3::NEG_INFINITY);
         for p in &self.cake_positions {
@@ -161,7 +164,7 @@ impl World {
         let cake = &self.physics.bodies[self.cake];
         let local_point = cake.position().inverse_transform_point(point.as_vec3());
         let com = cake.mass_properties().local_mprops.local_com;
-        if local_point.distance(com) as f64 > self.bounding_radius_m + GRAB_TOLERANCE_M {
+        if f64::from(local_point.distance(com)) > self.bounding_radius_m + GRAB_TOLERANCE_M {
             return;
         }
         let hand = &mut self.physics.bodies[self.hand];
@@ -170,16 +173,16 @@ impl World {
         let joint = SphericalJointBuilder::new().local_anchor1(Vector::ZERO).local_anchor2(local_point);
         let joint = self.physics.insert_impulse_joint(self.hand, self.cake, joint);
         set_damping(&mut self.physics.bodies[self.cake], HELD_LINEAR_DAMPING, HELD_ANGULAR_DAMPING);
-        self.set_knife_solid(true);
+        self.set_held_colliders_enabled(true);
         let stand_hold_y_m = self.is_on_stand().then_some(point.y + STAND_LIFT_M);
-        self.grip = Some(Grip { joint, grab_at, stand_hold_y_m });
+        self.grip = Some(Grip { joint, grab_at, local_anchor: local_point, stand_hold_y_m });
     }
 
-    /// The knife collides only with a held cake: a free cake is never pushed by the blade,
-    /// whose lowering already stops at the cake's surface.
-    fn set_knife_solid(&mut self, is_solid: bool) {
-        for &collider in &self.knife_colliders {
-            self.physics.colliders[collider].set_enabled(is_solid);
+    /// The knife and the space under the stand's plate collide only with a held cake: a free cake
+    /// is never pushed by the blade, whose lowering already stops at the cake's surface.
+    fn set_held_colliders_enabled(&mut self, is_enabled: bool) {
+        for &collider in &self.held_colliders {
+            self.physics.colliders[collider].set_enabled(is_enabled);
         }
     }
 
@@ -195,32 +198,37 @@ impl World {
     /// Moves the hand next tick, stopping the carried cake at the knife, stand, or table and
     /// sliding it along them. The rigid grip would otherwise drag the cake into them, through
     /// the thin blade or clipping into the stand, since a kinematic hand outmuscles any contact.
+    /// The sweep follows the grip's pull, from where the cake is held to the hand's next place,
+    /// rather than the hand's own step, since a cake carried briskly lags behind the hand.
+    #[expect(clippy::option_if_let_else, reason = "a match on the hit reads plainer than two closures")]
     fn set_hand_next(&mut self, to: DVec3) {
+        let grip = self.grip.as_ref().expect("only a held cake is carried");
         let from = self.physics.bodies[self.hand].translation().as_dvec3();
-        let step = (to - from).as_vec3();
+        let cake_pose = *self.physics.bodies[self.cake].position();
+        let anchor = cake_pose.transform_point(grip.local_anchor);
+        let pull = to.as_vec3() - anchor;
+        let next = match self.cast_carried_cake(&cake_pose, pull) {
+            None => from.as_vec3() + (to - from).as_vec3(),
+            Some(hit) => {
+                let allowed = pull * hit.time_of_impact;
+                let rest = pull - allowed;
+                anchor + allowed + rest - hit.normal1 * rest.dot(hit.normal1).min(0.0)
+            }
+        };
+        self.physics.bodies[self.hand].set_next_kinematic_translation(next);
+    }
+
+    /// The first solid the cake meets moving by `motion`. Rapier's query puts the hit collider
+    /// first, so `normal1` is the solid's outward normal, facing the cake, in world space.
+    fn cast_carried_cake(&self, cake_pose: &Pose, motion: Vector) -> Option<ShapeCastHit> {
         let options = ShapeCastOptions {
             max_time_of_impact: 1.0,
             target_distance: HAND_SWEEP_CLEARANCE_M,
             stop_at_penetration: false,
             compute_impact_geometry_on_penetration: true,
         };
-        let cake_pose = self.physics.bodies[self.cake].position();
-        let hit = self.physics.cast_shape(
-            cake_pose,
-            step,
-            &*self.cake_shape,
-            options,
-            QueryFilter::new().exclude_rigid_body(self.cake),
-        );
-        let step = match hit {
-            None => step,
-            Some((_, hit)) => {
-                let allowed = step * hit.time_of_impact;
-                let rest = step - allowed;
-                allowed + rest - hit.normal1 * rest.dot(hit.normal1).min(0.0)
-            }
-        };
-        self.physics.bodies[self.hand].set_next_kinematic_translation(from.as_vec3() + step);
+        let filter = QueryFilter::new().exclude_rigid_body(self.cake);
+        self.physics.cast_shape(cake_pose, motion, &*self.shared.shape, options, filter).map(|(_, hit)| hit)
     }
 }
 

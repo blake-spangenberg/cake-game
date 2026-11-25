@@ -1,6 +1,7 @@
 //! The cake's triangle tree only skips work: on real cakes in many poses, the knife lowers,
 //! tilts, rides, stops, and cuts exactly as it does checking every triangle, and the cake's width
 //! range matches checking every vertex, to the bit.
+#![expect(clippy::cast_possible_truncation, clippy::cast_precision_loss, reason = "test poses cast small literals")]
 
 use std::io::Read;
 use std::path::Path;
@@ -43,12 +44,12 @@ fn knife_stops_and_cuts_on_real_cakes_exactly_as_checking_every_triangle_does() 
             let knife = Knife { tilt_rad: random.pick_in(-MAX_AIMED_TILT_RAD, MAX_AIMED_TILT_RAD), ..PRESSED_KNIFE };
             let limit_m = knife.calc_lower_limit_m(&[brute]);
             assert_eq!(knife.calc_lower_limit_m(&[fast]), limit_m, "{id} pose {pose_idx}: {knife:?}");
-            hit_count += (limit_m < knife.calc_lower_limit_m(&[])) as u32;
+            hit_count += u32::from(limit_m < knife.calc_lower_limit_m(&[]));
 
             let stop_m = limit_m + random.pick_in(-0.03, 0.03);
             let is_cut = knife.is_cut_through(brute, stop_m);
             assert_eq!(knife.is_cut_through(fast, stop_m), is_cut, "{id} pose {pose_idx}: {knife:?} to {stop_m}");
-            cut_count += is_cut as u32;
+            cut_count += u32::from(is_cut);
 
             let turn_rad = random.pick_in(-MAX_STAND_TURN_RAD, MAX_STAND_TURN_RAD);
             let turned_positions = calc_turned_as_the_stand_sweep_did(&cake.positions, turn_rad);
@@ -113,7 +114,7 @@ struct PosedCake {
 
 impl PosedCake {
     /// Turned any way and lying about the stand's middle, under the pivot.
-    fn place(model: &CakeModel, random: &mut SplitMix64) -> PosedCake {
+    fn place(model: &CakeModel, random: &mut SplitMix64) -> Self {
         let axis = Vec3::new(random.pick_in(-1.0, 1.0) as f32, random.pick_in(-1.0, 1.0) as f32, 0.5).normalize();
         let pose_rotation = Rotation::from_axis_angle(axis, random.pick_in(-3.0, 3.0) as f32);
         let pose_translation = Vec3::new(
@@ -123,7 +124,7 @@ impl PosedCake {
         );
         let (rotation, translation) = (pose_rotation.as_dquat(), pose_translation.as_dvec3());
         let positions = model.mesh.positions.iter().map(|p| rotation * p.as_dvec3() + translation).collect();
-        PosedCake { positions, rotation, translation }
+        Self { positions, rotation, translation }
     }
 }
 

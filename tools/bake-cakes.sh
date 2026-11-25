@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebakes the cakes src/client/src/cakes.ts lists, each from its source build/candidates/objaverse/<id>.glb
-# with --keep-largest and its entry's repair options, into assets/cakes/<id>.cake.br. Run it after a
+# with --keep-largest and its entry's repair and bake options, into assets/cakes/<id>.cake.br. Run it after a
 # change to the repair or the bake, or to a cake's options. BAKE_JOBS sets how many bake at once.
 # Usage: tools/bake-cakes.sh [id...]   (every listed cake when no id is given)
 set -euo pipefail
@@ -8,14 +8,14 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 TOP_DIR=$( git -C "$SCRIPT_DIR" rev-parse --show-toplevel )
 cd "$TOP_DIR"
 
-# One line per cake to bake: its id, then its repair options.
+# One line per cake to bake: its id, then its repair and bake options.
 recipes=$(node --input-type=module -e '
 import { CAKES } from "./src/client/src/cakes.ts";
 const wanted = process.argv.slice(1);
 const unknown = wanted.filter((id) => !CAKES.some((cake) => cake.id === id));
 if (unknown.length > 0) throw new Error(`not in src/client/src/cakes.ts: ${unknown.join(" ")}`);
 for (const cake of CAKES) {
-  if (wanted.length === 0 || wanted.includes(cake.id)) console.log([cake.id, ...(cake.repair ?? [])].join(" "));
+  if (wanted.length === 0 || wanted.includes(cake.id)) console.log([cake.id, ...(cake.repair ?? []), ...(cake.bake ?? [])].join(" "));
 }' "$@")
 
 bake_one() {

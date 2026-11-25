@@ -38,7 +38,9 @@ const SWEEP_MARGIN_RAD: f64 = 0.005;
 /// settling under a resting knife does not block every turn.
 const TOUCH_TOLERANCE_M: f64 = 0.0005;
 /// How far above the player's lowering a tilt may lift the edge to ride over a bump, such as a
-/// mitten's knit. The client lets the player press a few millimeters past where the knife stops,
+/// mitten's knit.
+///
+/// The client lets the player press a few millimeters past where the knife stops,
 /// and those come off the highest bump ridden.
 pub const MAX_RIDE_M: f64 = 0.015;
 /// How far past the cut's stop a cake may reach and still lie in its path, so a cake settled a
@@ -55,6 +57,7 @@ const REST_STAGE_HALF_LIFE_S: f64 = 0.286;
 const TREE_MARGIN_M: f64 = 1e-6;
 
 /// The knife's cut plane always passes through [`PIVOT`], tilting about the edge's direction.
+///
 /// `lower_m` is how far the edge's lowest point lies below the pivot within the plane. The player
 /// lowers it from `rest_m`, which floats with the cake's height by sliding the knife along its
 /// blade, so the cut line stays in place.
@@ -78,7 +81,7 @@ pub struct KnifeFrame {
 }
 
 impl KnifeFrame {
-    fn calc_plane(&self) -> Plane {
+    const fn calc_plane(&self) -> Plane {
         Plane { point: PIVOT, normal: self.normal }
     }
 
@@ -118,8 +121,9 @@ pub struct Turn {
 }
 
 impl Turn {
-    pub fn calc(angle_rad: f64) -> Turn {
-        Turn { sin: libm::sin(angle_rad), cos: libm::cos(angle_rad) }
+    #[must_use]
+    pub fn calc(angle_rad: f64) -> Self {
+        Self { sin: libm::sin(angle_rad), cos: libm::cos(angle_rad) }
     }
 
     fn calc_turned(&self, p: DVec3) -> DVec3 {
@@ -133,7 +137,8 @@ impl Turn {
 
 impl<'a> Solid<'a> {
     /// A solid at `positions` whose every triangle the knife checks.
-    pub fn new(positions: &'a [DVec3], triangles: &'a [[u32; 3]]) -> Solid<'a> {
+    #[must_use]
+    pub const fn new(positions: &'a [DVec3], triangles: &'a [[u32; 3]]) -> Self {
         Solid { positions, triangles, turn: None, tree: None }
     }
 
@@ -146,6 +151,7 @@ impl<'a> Solid<'a> {
     /// coordinates and in no particular order, or with only those of them that might reach no
     /// deeper below the pivot than `max_depth_m`. `on_segment` may lower `max_depth_m`, or break to
     /// stop, which breaks this too.
+    #[expect(clippy::cast_possible_truncation, reason = "a mesh's triangle count fits its u32 indices")]
     fn search_section(
         &self,
         frame: &KnifeFrame,
@@ -181,6 +187,7 @@ impl<'a> Solid<'a> {
 }
 
 impl Knife {
+    #[must_use]
     pub fn calc_frame(&self) -> KnifeFrame {
         let (sin_tilt, cos_tilt) = (libm::sin(self.tilt_rad), libm::cos(self.tilt_rad));
         let level_normal = EDGE.cross(DVec3::Y);
@@ -188,8 +195,14 @@ impl Knife {
         KnifeFrame { edge: EDGE, down, normal: EDGE.cross(down) }
     }
 
+    #[must_use]
     pub fn calc_plane(&self) -> Plane {
         self.calc_frame().calc_plane()
+    }
+
+    /// Whether the knife hangs below its rest, as the player's pressing lowers it.
+    pub(crate) fn is_lowered(&self) -> bool {
+        self.lower_m > self.rest_m
     }
 
     /// Where the knife's local frame sits in the world, its origin at the edge's lowest point.
@@ -208,11 +221,12 @@ impl Knife {
     }
 
     /// Rotation from the knife's local frame (x along the edge, y up the blade) to the world.
+    #[must_use]
     pub fn calc_rotation(&self) -> Rotation {
         let half_sqrt = core::f64::consts::FRAC_1_SQRT_2;
         let (sin_half, cos_half) = (libm::sin(-self.tilt_rad / 2.0), libm::cos(-self.tilt_rad / 2.0));
         let [x, y, z, w] = [sin_half * half_sqrt, -cos_half * half_sqrt, sin_half * half_sqrt, cos_half * half_sqrt];
-        Rotation::from_xyzw(x as f32, y as f32, z as f32, w as f32)
+        DQuat::from_xyzw(x, y, z, w).as_quat()
     }
 
     /// Takes the player's lowering, then tilt, then lowering again at the new tilt. Lowering
@@ -225,7 +239,7 @@ impl Knife {
         let ride_lower_m = self.lower_m.min(wanted_lower_m - MAX_RIDE_M);
         let target_tilt_rad = calc_radians(input.tilt).clamp(-MAX_TILT_RAD, MAX_TILT_RAD);
         self.tilt_rad = calc_sweep_reach(self.tilt_rad, target_tilt_rad, |tilt_rad| {
-            Knife { tilt_rad, lower_m: ride_lower_m, ..*self }.is_clear_of(solids)
+            Self { tilt_rad, lower_m: ride_lower_m, ..*self }.is_clear_of(solids)
         });
         self.lower_toward(wanted_lower_m, solids);
     }
@@ -258,6 +272,7 @@ impl Knife {
     /// lies within the blade's span and no deeper than the stop, since the cake splits whole along
     /// the plane. The cut rocks the curved edge along its stop, so it reaches that depth across the
     /// span, not only at the edge's middle.
+    #[must_use]
     pub fn is_cut_through(&self, cake: Solid, stop_lower_m: f64) -> bool {
         let frame = self.calc_frame();
         let mut reach_m = stop_lower_m + CUT_DEPTH_TOLERANCE_M;
@@ -269,6 +284,7 @@ impl Knife {
     }
 
     /// How far the edge can lower before it touches one of `solids` or the table.
+    #[must_use]
     pub fn calc_lower_limit_m(&self, solids: &[Solid]) -> f64 {
         let frame = self.calc_frame();
         let mut limit_m = calc_table_limit_m(&frame);
@@ -287,6 +303,8 @@ impl Knife {
 
 /// How far a turn from `from_rad` toward `to_rad` gets while `is_clear` holds, stopping
 /// [`SWEEP_MARGIN_RAD`] short of where it first fails but never turning back.
+#[expect(clippy::float_cmp, reason = "only a turn of exactly nothing needs no sweep")]
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a whole count of probes")]
 pub(crate) fn calc_sweep_reach(from_rad: f64, to_rad: f64, is_clear: impl Fn(f64) -> bool) -> f64 {
     if to_rad == from_rad {
         return to_rad;
@@ -296,7 +314,7 @@ pub(crate) fn calc_sweep_reach(from_rad: f64, to_rad: f64, is_clear: impl Fn(f64
     let step_len = libm::ceil((probe_to_rad - from_rad).abs() / SWEEP_PROBE_RAD) as u32;
     let mut clear_rad = from_rad;
     for i in 1..=step_len {
-        let probe_rad = from_rad + (probe_to_rad - from_rad) * i as f64 / step_len as f64;
+        let probe_rad = from_rad + (probe_to_rad - from_rad) * f64::from(i) / f64::from(step_len);
         if !is_clear(probe_rad) {
             let contact_rad = calc_bisected_reach(clear_rad, probe_rad, is_clear);
             let reach_rad = ((contact_rad - from_rad).abs() - SWEEP_MARGIN_RAD).max(0.0);
@@ -309,7 +327,7 @@ pub(crate) fn calc_sweep_reach(from_rad: f64, to_rad: f64, is_clear: impl Fn(f64
 
 fn calc_bisected_reach(mut clear_rad: f64, mut blocked_rad: f64, is_clear: impl Fn(f64) -> bool) -> f64 {
     for _ in 0..SWEEP_BISECTIONS {
-        let middle_rad = (clear_rad + blocked_rad) / 2.0;
+        let middle_rad = f64::midpoint(clear_rad, blocked_rad);
         if is_clear(middle_rad) {
             clear_rad = middle_rad;
         } else {
@@ -320,15 +338,17 @@ fn calc_bisected_reach(mut clear_rad: f64, mut blocked_rad: f64, is_clear: impl 
 }
 
 /// Height of the edge above its lowest point at `u_m` along it.
+#[must_use]
 pub fn calc_edge_rise_m(u_m: f64) -> f64 {
     BLADE_ARC_RADIUS_M - libm::sqrt(BLADE_ARC_RADIUS_M * BLADE_ARC_RADIUS_M - u_m * u_m)
 }
 
 /// The blade's convex outline as `(x, y)` in the knife's local frame: along the curved edge in
 /// `edge_segments` pieces, then back along its straight back.
+#[must_use]
 pub fn calc_blade_outline(edge_segments: u32) -> Vec<[f64; 2]> {
     let edge = (0..=edge_segments).map(|i| {
-        let u_m = BLADE_HALF_SPAN_M * (2.0 * i as f64 / edge_segments as f64 - 1.0);
+        let u_m = BLADE_HALF_SPAN_M * (2.0 * f64::from(i) / f64::from(edge_segments) - 1.0);
         [u_m, calc_edge_rise_m(u_m)]
     });
     edge.chain([[BLADE_HALF_SPAN_M, BLADE_BACK_M], [-BLADE_HALF_SPAN_M, BLADE_BACK_M]]).collect()
@@ -340,17 +360,16 @@ pub(crate) fn build_blade_hull() -> Vec<Vec3> {
     let half_thickness_m = BLADE_COLLIDER_THICKNESS_M / 2.0;
     calc_blade_outline(BLADE_HULL_SEGMENTS)
         .into_iter()
-        .flat_map(|[x_m, y_m]| {
-            [-half_thickness_m, half_thickness_m].map(|z_m| Vec3::new(x_m as f32, y_m as f32, z_m as f32))
-        })
+        .flat_map(|[x_m, y_m]| [-half_thickness_m, half_thickness_m].map(|z_m| DVec3::new(x_m, y_m, z_m).as_vec3()))
         .collect()
 }
 
 /// Centers of the two handles in the knife's local frame, each upright along local y.
+#[must_use]
 pub fn calc_handle_centers() -> [Vec3; 2] {
-    let x_m = (BLADE_HALF_SPAN_M - HANDLE_RADIUS_M) as f32;
-    let y_m = (BLADE_BACK_M + HANDLE_LEN_M / 2.0) as f32;
-    [Vec3::new(-x_m, y_m, 0.0), Vec3::new(x_m, y_m, 0.0)]
+    let x_m = BLADE_HALF_SPAN_M - HANDLE_RADIUS_M;
+    let y_m = BLADE_BACK_M + HANDLE_LEN_M / 2.0;
+    [DVec3::new(-x_m, y_m, 0.0).as_vec3(), DVec3::new(x_m, y_m, 0.0).as_vec3()]
 }
 
 /// How far the edge can lower before it touches the table.
@@ -362,6 +381,7 @@ fn calc_table_limit_m(frame: &KnifeFrame) -> f64 {
 /// where the segment lies beyond the blade's ends. A point `u` along the edge and `s` down from
 /// the pivot is reached at lowering `s + rise(u)`, convex in `u`, so its least value on the
 /// segment is at the clamped stationary point.
+#[expect(clippy::float_cmp, reason = "only exactly equal ends would divide by zero")]
 fn calc_segment_lower_limit_m(frame: &KnifeFrame, a: DVec3, b: DVec3) -> Option<f64> {
     let ((ua, sa), (ub, sb)) = (frame.calc_plane_coords(a), frame.calc_plane_coords(b));
     let (u_min, u_max) = (ua.min(ub), ua.max(ub));
@@ -379,6 +399,7 @@ fn calc_segment_lower_limit_m(frame: &KnifeFrame, a: DVec3, b: DVec3) -> Option<
 
 /// The least depth below the pivot of the in-plane segment `a`-`b` where it lies within the
 /// blade's span, or `None` where it lies wholly beyond the blade's ends.
+#[expect(clippy::float_cmp, reason = "only exactly equal ends would divide by zero")]
 fn calc_segment_least_depth_m(frame: &KnifeFrame, a: DVec3, b: DVec3) -> Option<f64> {
     let ((ua, sa), (ub, sb)) = (frame.calc_plane_coords(a), frame.calc_plane_coords(b));
     let (u0, u1) = (ua.min(ub).max(-BLADE_HALF_SPAN_M), ua.max(ub).min(BLADE_HALF_SPAN_M));

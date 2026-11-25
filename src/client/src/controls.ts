@@ -6,13 +6,15 @@ import { Spring } from "./spring";
 
 type Drag =
   | { kind: "camera" }
-  | { kind: "cake"; grabAt: [number, number, number]; metersPerPx: number }
+  | { kind: "cake"; grabAt: [number, number, number]; grabPoint: THREE.Vector3; metersPerPx: number }
   | { kind: "knife"; alongEdgeM: number; aboveEdgeM: number; tiltSign: number }
   | { kind: "stand"; axisPx: THREE.Vector2; lastBearingRad: number; turnSign: number };
 type KnifeDrag = Extract<Drag, { kind: "knife" }>;
 
 const FLAG_HOLDING = 1 << 0;
 const ENCODED_LEN = 9;
+/** The encoded hand: its flags, grab point, and target, ahead of the knife's tilt and lowering and the stand's angle. */
+const ENCODED_HAND_LEN = 6;
 const TILT_RAD_PER_PX = 0.004;
 const LOWER_M_PER_PX = 0.0018;
 /** Mouse travel this near the stand's axis on screen gives no clear bearing, so it is ignored. */
@@ -111,6 +113,25 @@ export class Controls {
   }
 
   /**
+   * Lets go of the cake, knife, or stand as a released mouse does, but with the knife back at its
+   * rest at once, as a hidden tab's world holds it until the tab returns.
+   */
+  letGo(): void {
+    this.onPointerUp();
+    this.lower.snap(0);
+    this.sentLowerM = 0;
+    this.prevSentLowerM = 0;
+  }
+
+  /** `held`, an input `stepInput` built, with the hand let go and the knife at its rest, as `letGo` leaves the controls. */
+  buildReleasedInput(held: Int32Array): Int32Array {
+    const released = held.slice();
+    released.fill(0, 0, ENCODED_HAND_LEN);
+    released[ENCODED_HAND_LEN + 1] = 0;
+    return released;
+  }
+
+  /**
    * Eases every input one tick and returns it in the core's wire format, `Input::encode` in
    * `src/core/src/input.rs`. A control the core stopped short last tick stops there.
    */
@@ -149,7 +170,7 @@ export class Controls {
       const grabAt = hit.point.toArray().map((m) => this.quantizeM(m)) as [number, number, number];
       this.handX.snap(hit.point.x);
       this.handZ.snap(hit.point.z);
-      this.drag = { kind: "cake", grabAt, metersPerPx: this.calcMetersPerPx(hit.point) };
+      this.drag = { kind: "cake", grabAt, grabPoint: hit.point, metersPerPx: this.calcMetersPerPx(hit.point) };
     } else if (hit?.kind === "knife") {
       this.lower.halfLifeS = KNIFE_HALF_LIFE_S;
       this.drag = this.buildKnifeDrag(hit.point);
@@ -175,7 +196,7 @@ export class Controls {
     if (drag.kind === "camera") {
       this.orbit.dragBy(dxPx, dyPx);
     } else if (drag.kind === "cake") {
-      const [right, away] = this.orbit.getGroundAxes();
+      const [right, away] = this.orbit.getGroundAxes(drag.grabPoint);
       const delta = right.multiplyScalar(dxPx).addScaledVector(away, -dyPx).multiplyScalar(drag.metersPerPx);
       const { table_half_x_m: halfX, table_half_z_m: halfZ } = this.layout;
       this.handX.target = THREE.MathUtils.clamp(this.handX.target + delta.x, -halfX, halfX);

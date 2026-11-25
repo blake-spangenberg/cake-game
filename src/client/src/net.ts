@@ -13,8 +13,10 @@ const POSE_FLAG_CUT = 1 << 1;
 
 /** The server's `MAX_NAME_LEN`, the most characters a name may have; a server test keeps the two equal. */
 export const MAX_NAME_LEN = 24;
+/** The cake a host picks for one the server settles at random. */
+export const RANDOM_CAKE = "random";
 
-type Phase = "lobby" | "loading" | "playing" | "results";
+type Phase = "lobby" | "loading" | "playing" | "judging" | "results";
 
 export interface Member {
   id: number;
@@ -34,27 +36,54 @@ export interface Standing {
   has_touched: boolean;
 }
 
+/** The next round's cake, always a real one, and whether the host picked Random, which the server settled on it. */
+export type PickMessage = { type: "pick"; cake: string; is_random: boolean };
+
+/** A round's standings, best first, and everyone in the room in the order they give their standup update. */
+export type ResultsMessage = { type: "results"; standings: Standing[]; standup: Member[] };
+
+/** A player's cut, frozen at `tick` with its pose, the knife's lowering at its bottom, and whether it divided the cake. Never the score. */
+export type CutMessage = {
+  type: "cut";
+  id: number;
+  tick: number;
+  pose: { cake: number[]; knife: [number, number, number]; stand_rad: number };
+  cut_lower_m: number;
+  cake_touch_lower_m: number;
+  is_cut_through: boolean;
+};
+
+/** The judging reveal begun `elapsed_ms` ago: each round player in `order`, a scene of `scene_ms` apiece, judged by their standing. */
+export type JudgingMessage = { type: "judging"; order: number[]; scene_ms: number; elapsed_ms: number; standings: Standing[] };
+
+/** To a page reopened into its seat in a round: every tick its world stepped, as runs of one input in the core's wire format, and the tick it cut at, if it has. */
+export type ResumeMessage = { type: "resume"; runs: { ticks: number; input: number[] }[]; cut_tick: number | null };
+
 export type ServerMessage =
-  | { type: "welcome"; id: number }
+  | { type: "welcome"; id: number; seat: string }
+  | ResumeMessage
   | RoomMessage
-  | { type: "round"; cake: string; round_ticks: number; players: number[] }
+  | PickMessage
+  | { type: "claim_refused" }
+  /** The round's players named as it started, so a page that joins after one left can still label them. */
+  | { type: "round"; cake: string; round_ticks: number; players: Member[] }
+  /** The round's players whose page had not loaded the cake when it started, who spectate it instead. */
+  | { type: "sit_out"; players: number[] }
   | { type: "start"; elapsed_ms: number }
-  | {
-      type: "cut";
-      id: number;
-      tick: number;
-      pose: { cake: number[]; knife: [number, number, number]; stand_rad: number };
-      cut_lower_m: number;
-      cake_touch_lower_m: number;
-      is_cut_through: boolean;
-    }
-  | { type: "results"; standings: Standing[] }
+  | CutMessage
+  /** Every round player has cut; the judging follows once the opponents' tiles have played the last cut. */
+  | { type: "play_over" }
+  | JudgingMessage
+  | ResultsMessage
   | { type: "desync"; tick: number }
   | { type: "error"; message: string };
 
 type ClientMessage =
-  | { type: "join"; name: string }
-  | { type: "start"; cake: string }
+  | { type: "join"; name: string; standup_preference: number; seat: string | null }
+  | { type: "claim_host"; password: string }
+  | { type: "pick"; cake: string }
+  | { type: "start" }
+  | { type: "return_to_lobby" }
   | { type: "ready" }
   | { type: "cut"; tick: number }
   | { type: "hash"; tick: number; hash: string };
@@ -81,21 +110,35 @@ export function findServerUrl(): URL | null {
   return url;
 }
 
+/** What a player gives on joining: the name others see, and their standup order preference, hidden from others until the results. */
+export interface Profile {
+  name: string;
+  /** From 0, first to give their update, to 1, last. */
+  standupPreference: number;
+}
+
 export class Net {
   /** Every player's latest pose in the newest round, by id. */
   readonly poses = new Map<number, PlayerPose>();
   private readonly socket: WebSocket;
+  private isLeaving = false;
 
-  /** Joins as `name`, at most `MAX_NAME_LEN` characters with no control characters, which the server would refuse. */
-  constructor(url: URL, name: string, onMessage: (message: ServerMessage) => void, onClose: () => void) {
+  /**
+   * Joins with `profile`, whose name has at most `MAX_NAME_LEN` characters and no control
+   * characters, which the server would refuse, into the `seat` an earlier page of this player's
+   * was welcomed with, if it is still held. `onClose` runs when the connection is lost, but not after `disconnect`.
+   */
+  constructor(url: URL, profile: Profile, seat: string | null, onMessage: (message: ServerMessage) => void, onClose: () => void) {
     this.socket = new WebSocket(url);
     this.socket.binaryType = "arraybuffer";
-    this.socket.addEventListener("open", () => this.sendJson({ type: "join", name }));
+    this.socket.addEventListener("open", () => this.sendJson({ type: "join", name: profile.name, standup_preference: profile.standupPreference, seat }));
     this.socket.addEventListener("close", (event) => {
+      if (this.isLeaving) return;
       console.error(`server connection closed: ${event.code} ${event.reason}`);
       onClose();
     });
     this.socket.addEventListener("message", (event) => {
+      if (this.isLeaving) return;
       if (event.data instanceof ArrayBuffer) {
         this.readPoses(event.data);
         return;
@@ -114,8 +157,26 @@ export class Net {
     this.socket.send(frame);
   }
 
-  sendStart(cake: string): void {
-    this.sendJson({ type: "start", cake });
+  /** Leaves the room for good, with no `onClose` and no more messages. */
+  disconnect(): void {
+    this.isLeaving = true;
+    this.socket.close();
+  }
+
+  sendClaimHost(password: string): void {
+    this.sendJson({ type: "claim_host", password });
+  }
+
+  sendPick(cake: string): void {
+    this.sendJson({ type: "pick", cake });
+  }
+
+  sendStart(): void {
+    this.sendJson({ type: "start" });
+  }
+
+  sendReturnToLobby(): void {
+    this.sendJson({ type: "return_to_lobby" });
   }
 
   sendReady(): void {

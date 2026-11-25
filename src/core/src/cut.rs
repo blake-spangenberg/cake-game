@@ -21,6 +21,7 @@ pub const MAX_SCORE: f64 = 100.0;
 impl Split {
     /// [`MAX_SCORE`] for halves of equal volume, falling linearly with the imbalance to 0 for a
     /// cut that misses: a percentage. Players see it rounded, and the unrounded value breaks ties.
+    #[must_use]
     pub fn calc_score(&self) -> f64 {
         let total_m3 = self.above_m3 + self.below_m3;
         if total_m3 <= 0.0 {
@@ -30,9 +31,11 @@ impl Split {
     }
 }
 
-/// Divides a closed mesh, given in world coordinates, by a plane. Each triangle is clipped to
-/// each side and the pieces are summed as signed tetrahedra with their apex on the plane, so the
-/// cut face contributes nothing and needs no triangulation.
+/// Divides a closed mesh, given in world coordinates, by a plane.
+///
+/// Each triangle is clipped to each side and the pieces are summed as signed tetrahedra with their
+/// apex on the plane, so the cut face contributes nothing and needs no triangulation.
+#[must_use]
 pub fn calc_split(positions: &[DVec3], triangles: &[[u32; 3]], plane: &Plane) -> Split {
     let mut above_m3 = 0.0;
     let mut below_m3 = 0.0;

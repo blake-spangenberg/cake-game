@@ -1,9 +1,12 @@
+import { playTick } from "./sound";
+
 /** The red numeric timer shows only once this many seconds or fewer are left. */
 const URGENT_S = 10;
 
 /**
  * The round's countdown: a pie that loses area as the round's ticks run out, its edge sweeping
- * clockwise from 12 o'clock, and a red count of whole seconds over it in the last `URGENT_S`.
+ * clockwise from 12 o'clock, and a red count of whole seconds over it in the last `URGENT_S`,
+ * which ticks audibly as it counts down.
  */
 export class Countdown {
   private readonly pie: HTMLElement;
@@ -25,12 +28,10 @@ export class Countdown {
     const seconds = Math.max(Math.ceil(ticksLeft / this.ticksPerS), 0);
     if (seconds === this.lastSeconds) return;
     const isUrgent = seconds <= URGENT_S;
-    if (isUrgent && this.lastSeconds !== null && seconds < this.lastSeconds) playTick();
+    // 0 s is the whistle's, which `RoundWhistle` blows.
+    if (isUrgent && seconds > 0 && this.lastSeconds !== null && seconds < this.lastSeconds) playTick();
     this.lastSeconds = seconds;
     this.seconds.hidden = !isUrgent;
     this.seconds.textContent = `${seconds}`;
   }
 }
-
-/** Where the countdown's audible tick plays on each update of the red timer; silent until the game has sounds. */
-function playTick(): void {}

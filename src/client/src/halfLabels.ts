@@ -39,7 +39,6 @@ export class HalfLabels {
       pointerEvents: "none",
       overflow: "visible",
       filter: "drop-shadow(0 0 2px rgb(0 0 0 / 85%))",
-      fontFamily: "system-ui, sans-serif",
       fontSize: `${FONT_PX}px`,
       fontVariantNumeric: "tabular-nums",
     });

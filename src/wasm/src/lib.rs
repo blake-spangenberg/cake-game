@@ -6,7 +6,7 @@ use cake_core::knife::{
     BLADE_ARC_RADIUS_M, BLADE_BACK_M, BLADE_HALF_SPAN_M, BLADE_THICKNESS_M, HANDLE_LEN_M, HANDLE_RADIUS_M,
     MAX_TILT_RAD, START_TILT_RAD, calc_blade_outline, calc_handle_centers,
 };
-use cake_core::replay::{build_scripted_inputs, replay};
+use cake_core::replay::{build_scripted_inputs, replay, replay_script_on};
 use cake_core::sim::{Phase, ROUND_TICKS, TICKS_PER_S, World};
 use cake_core::table::{
     PIVOT, STAND_PARTS, STAND_PLATE_THICKNESS_M, STAND_RADIUS_M, STAND_TOP_Y_M, TABLE_HALF_X_M, TABLE_HALF_Z_M,
@@ -46,6 +46,8 @@ pub struct Layout {
 }
 
 #[wasm_bindgen]
+#[must_use]
+#[expect(clippy::missing_const_for_fn, reason = "wasm-bindgen exports cannot be const")]
 pub fn get_layout() -> Layout {
     Layout {
         table_half_x_m: TABLE_HALF_X_M,
@@ -71,39 +73,58 @@ pub fn get_layout() -> Layout {
 
 /// The stand's cylinders from top to bottom as flattened `(radius, y0, y1)` triples, meters.
 #[wasm_bindgen]
+#[must_use]
 pub fn get_stand_parts() -> Vec<f64> {
     STAND_PARTS.iter().flat_map(|part| [part.radius_m, part.y0_m, part.y1_m]).collect()
 }
 
 /// The blade's outline in the knife's local frame as flattened `(x, y)` pairs, meters.
 #[wasm_bindgen]
+#[must_use]
 pub fn get_blade_outline() -> Vec<f64> {
     calc_blade_outline(BLADE_DRAW_SEGMENTS).into_iter().flatten().collect()
 }
 
 /// The two handles' centers in the knife's local frame, flattened `(x, y, z)`, meters.
 #[wasm_bindgen]
+#[must_use]
 pub fn get_handle_centers() -> Vec<f32> {
-    calc_handle_centers().iter().flat_map(|center| center.to_array()).collect()
+    calc_handle_centers().into_iter().flat_map(<[f32; 3]>::from).collect()
 }
 
 /// The determinism checkpoints of the scripted round, to compare against a native replay.
 #[wasm_bindgen]
+#[must_use]
 pub fn replay_script() -> Vec<u64> {
     replay(&build_scripted_inputs())
 }
 
+/// The determinism checkpoints of the scripted round on the baked cake in `cake_file`.
+///
+/// # Errors
+/// When `cake_file` is not a playable cake.
 #[wasm_bindgen]
+pub fn replay_cake_script(cake_file: &[u8]) -> Result<Vec<u64>, JsError> {
+    Ok(replay_script_on(decode_cake(cake_file)?))
+}
+
+#[wasm_bindgen]
+#[expect(clippy::missing_const_for_fn, reason = "wasm-bindgen exports cannot be const")]
 impl Game {
     /// A round on the baked cake in `cake_file` that cuts itself at `round_ticks`, or never when
     /// it is undefined.
+    ///
+    /// # Errors
+    /// When `cake_file` is not a playable cake.
     #[wasm_bindgen(constructor)]
-    pub fn new(round_ticks: Option<u32>, cake_file: &[u8]) -> Result<Game, JsError> {
-        let model = CakeModel::decode(cake_file).map_err(|error| JsError::new(&format!("cake file: {error:?}")))?;
-        Ok(Game { world: World::create(model, START_TILT_RAD, round_ticks) })
+    pub fn new(round_ticks: Option<u32>, cake_file: &[u8]) -> Result<Self, JsError> {
+        Ok(Self { world: World::create(decode_cake(cake_file)?, START_TILT_RAD, round_ticks) })
     }
 
     /// Advances one tick with an input in the core's wire format.
+    ///
+    /// # Errors
+    /// When `encoded_input` is not a valid input.
     pub fn step(&mut self, encoded_input: &[i32]) -> Result<(), JsError> {
         let input = Input::decode(encoded_input).map_err(|error| JsError::new(&format!("input: {error:?}")))?;
         self.world.step(&input);
@@ -171,12 +192,12 @@ impl Game {
     /// The knife's unit edge, down, and normal vectors, flattened.
     pub fn get_knife_frame(&self) -> Vec<f64> {
         let frame = self.world.get_knife().calc_frame();
-        [frame.edge, frame.down, frame.normal].iter().flat_map(|v| v.to_array()).collect()
+        [frame.edge, frame.down, frame.normal].into_iter().flat_map(<[f64; 3]>::from).collect()
     }
 
     /// The cake mesh's local vertex positions, flattened.
     pub fn get_cake_mesh_positions(&self) -> Vec<f32> {
-        self.world.get_model().mesh.positions.iter().flat_map(|p| p.to_array()).collect()
+        self.world.get_model().mesh.positions.iter().copied().flat_map(<[f32; 3]>::from).collect()
     }
 
     /// Each cake mesh triangle's corners' UVs from the texture's top left, 0 to 1, flattened in
@@ -204,10 +225,15 @@ impl Game {
     }
 
     /// Each cake mesh triangle corner's unit normal, flattened in triangle order, smooth but for
-    /// creases sharper than `crease_rad` (`Mesh::calc_corner_normals`).
-    pub fn calc_cake_corner_normals(&self, crease_rad: f32) -> Vec<f32> {
-        self.world.get_model().mesh.calc_corner_normals(crease_rad).iter().flat_map(|n| n.to_array()).collect()
+    /// creases, as the cake file holds them (`CakeModel::corner_normals`).
+    pub fn get_cake_corner_normals(&self) -> Vec<f32> {
+        let model = self.world.get_model();
+        model.corner_normals.to_corners(&model.mesh).into_iter().flat_map(<[f32; 3]>::from).collect()
     }
+}
+
+fn decode_cake(cake_file: &[u8]) -> Result<CakeModel, JsError> {
+    CakeModel::decode(cake_file).map_err(|error| JsError::new(&format!("cake file: {error:?}")))
 }
 
 fn to_result(split: &Split) -> Vec<f64> {
