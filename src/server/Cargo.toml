@@ -1,0 +1,19 @@
+[package]
+name = "cake-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cake-core = { path = "../core" }
+axum = { version = "0.8", features = ["ws"] }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+# Parses every float back to the exact value the server wrote, which the tests compare.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tower-http = { version = "0.6", features = ["fs"] }
+
+[dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tokio-tungstenite = "0.29"

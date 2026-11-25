@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-
 use rapier3d::glamx::DVec3;
 use rapier3d::math::Vec3;
+
+use crate::triangle_tree::TriangleTree;
 
 /// How many directions [`Mesh::calc_width_range_m`] spreads over a hemisphere, about 9 degrees
 /// apart.
@@ -45,28 +45,28 @@ impl Mesh {
 
     /// Accepts the mesh only if it is closed: every edge borders exactly two triangles, which
     /// traverse it in opposite directions.
+    /// Edges are checked in order of their vertex indices, so the error names the first bad one.
     pub fn validate_closed(&self) -> Result<(), MeshError> {
-        let vertex_len = self.positions.len() as u32;
-        let mut directed_edge_counts: BTreeMap<(u32, u32), u32> = BTreeMap::new();
-        for (triangle_idx, triangle) in self.triangles.iter().enumerate() {
-            if triangle.iter().any(|&i| i >= vertex_len) {
-                return Err(MeshError::IndexOutOfRange { triangle_idx });
-            }
-            for k in 0..3 {
-                let edge = (triangle[k], triangle[(k + 1) % 3]);
-                *directed_edge_counts.entry(edge).or_default() += 1;
-            }
+        let vertex_len = self.positions.len();
+        let stray_idx = self.triangles.iter().position(|triangle| triangle.iter().any(|&i| i as usize >= vertex_len));
+        if let Some(triangle_idx) = stray_idx {
+            return Err(MeshError::IndexOutOfRange { triangle_idx });
         }
-        for (&(from, to), &count) in &directed_edge_counts {
-            if count > 1 {
-                return Err(MeshError::InconsistentWinding { from, to });
-            }
-            match directed_edge_counts.get(&(to, from)) {
-                None => return Err(MeshError::OpenEdge { from, to }),
-                Some(&reverse_count) if reverse_count > 1 => {
-                    return Err(MeshError::NonManifoldEdge { from, to });
+        let triangles = &self.triangles;
+        let mut edge_ends =
+            VertexGroups::build(vertex_len, triangles, |triangle_idx, k| triangles[triangle_idx][(k + 1) % 3]);
+        edge_ends.sort_each();
+        for from in 0..vertex_len as u32 {
+            let ends = edge_ends.get(from);
+            for (end_idx, &to) in ends.iter().enumerate() {
+                if ends.get(end_idx + 1) == Some(&to) {
+                    return Err(MeshError::InconsistentWinding { from, to });
                 }
-                Some(_) => {}
+                match edge_ends.get(to).iter().filter(|&&back| back == from).count() {
+                    0 => return Err(MeshError::OpenEdge { from, to }),
+                    1 => {}
+                    _ => return Err(MeshError::NonManifoldEdge { from, to }),
+                }
             }
         }
         Ok(())
@@ -82,6 +82,32 @@ impl Mesh {
         self.positions.iter().map(|p| p.distance(point)).fold(0.0, f32::max)
     }
 
+    /// Each triangle corner's unit normal, three per triangle in order, for drawing: the average of
+    /// the normals of the triangles around its vertex that meet its own triangle's within
+    /// `crease_rad`, so the mesh shades smoothly but for creases.
+    pub fn calc_corner_normals(&self, crease_rad: f32) -> Vec<Vec3> {
+        let face_normals: Vec<Vec3> = self
+            .triangles
+            .iter()
+            .map(|&[a, b, c]| {
+                let [a, b, c] = [a, b, c].map(|i| self.positions[i as usize]);
+                (b - a).cross(c - a).normalize_or_zero()
+            })
+            .collect();
+        let faces_around = VertexGroups::build(self.positions.len(), &self.triangles, |face_idx, _| face_idx as u32);
+        let min_dot = crease_rad.cos();
+        let calc_corner_normal = |vertex: u32, own: Vec3| {
+            let near =
+                faces_around.get(vertex).iter().map(|&idx| face_normals[idx as usize]).filter(|n| n.dot(own) > min_dot);
+            near.sum::<Vec3>().normalize_or_zero()
+        };
+        self.triangles
+            .iter()
+            .zip(&face_normals)
+            .flat_map(|(triangle, &own)| triangle.map(|vertex| calc_corner_normal(vertex, own)))
+            .collect()
+    }
+
     /// An upper bound on the longest distance across the mesh: the diameter of the smallest sphere
     /// about its bounding box's center that holds every vertex.
     pub fn calc_extent_bound(&self) -> f32 {
@@ -93,20 +119,82 @@ impl Mesh {
     }
 
     /// The least and greatest of the mesh's widths along a fixed spread of directions: about how
-    /// tall it stands in its flattest and its tallest pose.
-    pub(crate) fn calc_width_range_m(&self) -> (f64, f64) {
+    /// tall it stands in its flattest and its tallest pose. A `tree` built on this mesh gives the
+    /// same result to the bit, sooner.
+    pub fn calc_width_range_m(&self, tree: Option<&TriangleTree>) -> (f64, f64) {
+        let loose_positions = match tree {
+            None => self.positions.clone(),
+            Some(_) => self.find_unreferenced_positions(),
+        };
         calc_width_directions().fold((f64::INFINITY, f64::NEG_INFINITY), |(least_m, greatest_m), direction| {
-            let width_m = self.calc_width_m(direction);
+            let (mut low_m, mut high_m) = calc_span_along(&loose_positions, direction);
+            if let Some(tree) = tree {
+                let (tree_low_m, tree_high_m) = tree.calc_span_along(&self.positions, &self.triangles, direction);
+                (low_m, high_m) = (low_m.min(tree_low_m), high_m.max(tree_high_m));
+            }
+            let width_m = high_m - low_m;
             (least_m.min(width_m), greatest_m.max(width_m))
         })
     }
 
-    fn calc_width_m(&self, direction: DVec3) -> f64 {
-        let (low_m, high_m) = self.positions.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), p| {
-            let along_m = p.as_dvec3().dot(direction);
-            (low.min(along_m), high.max(along_m))
-        });
-        high_m - low_m
+    /// The positions no triangle uses.
+    fn find_unreferenced_positions(&self) -> Vec<Vec3> {
+        let mut is_referenced = vec![false; self.positions.len()];
+        for &idx in self.triangles.iter().flatten() {
+            is_referenced[idx as usize] = true;
+        }
+        self.positions.iter().zip(is_referenced).filter(|&(_, is_referenced)| !is_referenced).map(|(&p, _)| p).collect()
+    }
+}
+
+/// The least and greatest `p.dot(direction)` over `positions`.
+fn calc_span_along(positions: &[Vec3], direction: DVec3) -> (f64, f64) {
+    positions.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), p| {
+        let along_m = p.as_dvec3().dot(direction);
+        (low.min(along_m), high.max(along_m))
+    })
+}
+
+/// Values filed under vertices, each vertex's a contiguous run in the order they were filed.
+struct VertexGroups {
+    /// Where each vertex's run starts in `values`, then the end of the last.
+    starts: Vec<u32>,
+    values: Vec<u32>,
+}
+
+impl VertexGroups {
+    /// Files `value_at(triangle_idx, k)` under each triangle's `k`th corner's vertex, in triangle
+    /// order.
+    fn build(vertex_len: usize, triangles: &[[u32; 3]], value_at: impl Fn(usize, usize) -> u32) -> VertexGroups {
+        let mut starts = vec![0u32; vertex_len + 1];
+        for &vertex in triangles.iter().flatten() {
+            starts[vertex as usize + 1] += 1;
+        }
+        for vertex in 0..vertex_len {
+            starts[vertex + 1] += starts[vertex];
+        }
+        let mut next_slots = starts[..vertex_len].to_vec();
+        let mut values = vec![0u32; 3 * triangles.len()];
+        for (triangle_idx, triangle) in triangles.iter().enumerate() {
+            for (k, &vertex) in triangle.iter().enumerate() {
+                let slot = &mut next_slots[vertex as usize];
+                values[*slot as usize] = value_at(triangle_idx, k);
+                *slot += 1;
+            }
+        }
+        VertexGroups { starts, values }
+    }
+
+    fn get(&self, vertex: u32) -> &[u32] {
+        let vertex = vertex as usize;
+        &self.values[self.starts[vertex] as usize..self.starts[vertex + 1] as usize]
+    }
+
+    fn sort_each(&mut self) {
+        for vertex in 0..self.starts.len() - 1 {
+            let (start, end) = (self.starts[vertex] as usize, self.starts[vertex + 1] as usize);
+            self.values[start..end].sort_unstable();
+        }
     }
 }
 

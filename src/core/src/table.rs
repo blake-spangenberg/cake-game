@@ -3,8 +3,8 @@
 use rapier3d::glamx::DVec3;
 
 /// The table centered on the origin.
-pub const TABLE_HALF_X_M: f64 = 0.8;
-pub const TABLE_HALF_Z_M: f64 = 0.5;
+pub const TABLE_HALF_X_M: f64 = 0.64;
+pub const TABLE_HALF_Z_M: f64 = 0.4;
 /// The cake stand's plate, centered on the origin and turned by the player. It is the cutting
 /// region: every cake fits on it, and the blade spans it at every pose.
 pub const STAND_RADIUS_M: f64 = 0.18;
@@ -43,7 +43,8 @@ const PIVOT_CLEARANCE_M: f64 = 0.02;
 /// The point every cut plane passes through, high enough that no cake in any pose on the stand
 /// reaches it.
 pub const PIVOT: DVec3 = DVec3::new(0.0, STAND_TOP_Y_M + MAX_CAKE_EXTENT_M + PIVOT_CLEARANCE_M, 0.0);
-/// Where the cake starts, on the table beside the stand so reaching it costs input distance.
-pub const CAKE_SPAWN: DVec3 = DVec3::new(0.5, 0.0, 0.15);
+/// Where the cake starts, on the table beside the stand so reaching it costs input distance, and as
+/// far from the stand as keeps every cake on the table, some of which tip over as they settle.
+pub const CAKE_SPAWN: DVec3 = DVec3::new(0.42, 0.0, 0.12);
 /// A cake whose center falls below this has left the table and respawns.
 pub const RESPAWN_BELOW_Y_M: f64 = -0.3;

@@ -44,30 +44,21 @@ pub fn calc_split(positions: &[DVec3], triangles: &[[u32; 3]], plane: &Plane) ->
     Split { above_m3, below_m3 }
 }
 
-/// Calls `on_segment` with each segment where a triangle crosses the plane, in world coordinates.
-pub(crate) fn for_each_section_segment(
-    positions: &[DVec3],
-    triangles: &[[u32; 3]],
-    plane: &Plane,
-    mut on_segment: impl FnMut(DVec3, DVec3),
-) {
-    for triangle in triangles {
-        let corners = triangle.map(|i| positions[i as usize]);
-        let distances = corners.map(|p| (p - plane.point).dot(plane.normal));
-        let mut crossings = [DVec3::ZERO; 2];
-        let mut crossing_len = 0;
-        for k in 0..3 {
-            let (d0, d1) = (distances[k], distances[(k + 1) % 3]);
-            if (d0 >= 0.0) == (d1 >= 0.0) {
-                continue;
-            }
-            crossings[crossing_len] = calc_edge_crossing(corners[k], corners[(k + 1) % 3], d0, d1);
-            crossing_len += 1;
+/// The segment where the triangle with `corners` crosses the plane, if it does, in world
+/// coordinates.
+pub(crate) fn find_section_segment(corners: &[DVec3; 3], plane: &Plane) -> Option<[DVec3; 2]> {
+    let distances = corners.map(|p| (p - plane.point).dot(plane.normal));
+    let mut crossings = [DVec3::ZERO; 2];
+    let mut crossing_len = 0;
+    for k in 0..3 {
+        let (d0, d1) = (distances[k], distances[(k + 1) % 3]);
+        if (d0 >= 0.0) == (d1 >= 0.0) {
+            continue;
         }
-        if crossing_len == 2 {
-            on_segment(crossings[0], crossings[1]);
-        }
+        crossings[crossing_len] = calc_edge_crossing(corners[k], corners[(k + 1) % 3], d0, d1);
+        crossing_len += 1;
     }
+    (crossing_len == 2).then_some(crossings)
 }
 
 fn calc_clipped_cone_volume(corners: &[DVec3; 3], plane: &Plane, side: f64) -> f64 {

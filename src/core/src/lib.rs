@@ -10,3 +10,4 @@ pub mod mesh;
 pub mod replay;
 pub mod sim;
 pub mod table;
+pub mod triangle_tree;

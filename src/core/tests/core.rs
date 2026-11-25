@@ -33,6 +33,30 @@ fn to_dvec3s(mesh: &Mesh) -> Vec<DVec3> {
 }
 
 #[test]
+fn box_corner_normals_keep_its_square_edges() {
+    let normals = build_box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).calc_corner_normals(std::f32::consts::FRAC_PI_3);
+    // The first triangle lies on the box's z = 0 face.
+    assert_eq!(normals[..3], [Vec3::NEG_Z; 3]);
+}
+
+#[test]
+fn corner_normals_blend_faces_meeting_gently_only_where_they_meet() {
+    // Two faces folded 23 degrees along the x axis, each rising by 0.2 over its width.
+    let mesh = Mesh {
+        positions: vec![Vec3::ZERO, Vec3::X, Vec3::new(0.5, 0.2, 1.0), Vec3::new(0.5, 0.2, -1.0)],
+        triangles: vec![[1, 0, 2], [0, 1, 3]],
+    };
+    let normals = mesh.calc_corner_normals(std::f32::consts::FRAC_PI_3);
+    let near = |a: Vec3, b: Vec3| a.distance(b) < 1e-6;
+    assert!(near(normals[0], Vec3::Y), "the shared edge's corners take the average: {:?}", normals[0]);
+    assert!(
+        near(normals[2], Vec3::new(0.0, 1.0, -0.2).normalize()),
+        "the far corner keeps its own face's: {:?}",
+        normals[2]
+    );
+}
+
+#[test]
 fn placeholder_cake_is_closed() {
     assert_eq!(build_slice_missing_cake().mesh.validate_closed(), Ok(()));
 }
@@ -184,7 +208,7 @@ const UPRIGHT_KNIFE: Knife = Knife { tilt_rad: 0.0, rest_m: 0.0, rest_lead_m: 0.
 
 fn calc_limit_m(knife: &Knife, mesh: &Mesh) -> f64 {
     let positions = to_dvec3s(mesh);
-    knife.calc_lower_limit_m(&[Solid { positions: &positions, triangles: &mesh.triangles }])
+    knife.calc_lower_limit_m(&[Solid::new(&positions, &mesh.triangles)])
 }
 
 #[test]
@@ -247,7 +271,7 @@ fn knife_ignores_a_cake_beyond_its_blade_end() {
 fn lowered_knife_tilted_into_a_cake_wall_rides_up_it_at_most_the_ride_allowance_then_stops() {
     let cake = build_box([-0.15, 0.0, -0.1], [-0.05, 0.2, 0.1]);
     let positions = to_dvec3s(&cake);
-    let solids = [Solid { positions: &positions, triangles: &cake.triangles }];
+    let solids = [Solid::new(&positions, &cake.triangles)];
     let lower = quantize_meters(0.39);
     let mut knife = UPRIGHT_KNIFE;
     knife.step(&KnifeInput { tilt: 0, lower }, &solids);
@@ -265,10 +289,7 @@ fn tilt_across_a_ridge(ridge_height_m: f32) -> f64 {
     let slab = build_box([-0.15, 0.0, -0.1], [0.15, 0.2, 0.1]);
     let ridge = build_box([-0.07, 0.2, -0.1], [-0.06, 0.2 + ridge_height_m, 0.1]);
     let (slab_positions, ridge_positions) = (to_dvec3s(&slab), to_dvec3s(&ridge));
-    let solids = [
-        Solid { positions: &slab_positions, triangles: &slab.triangles },
-        Solid { positions: &ridge_positions, triangles: &ridge.triangles },
-    ];
+    let solids = [Solid::new(&slab_positions, &slab.triangles), Solid::new(&ridge_positions, &ridge.triangles)];
     let lower = quantize_meters(PIVOT.y - 0.2 + 0.005);
     let mut knife = UPRIGHT_KNIFE;
     knife.step(&KnifeInput { tilt: 0, lower }, &solids);
@@ -368,7 +389,9 @@ fn settle_box_on_the_table_in_the_knife_plane(shift_z_m: f32) -> World {
 
 #[test]
 fn cake_on_the_table_under_the_stands_rim_is_not_cut_since_the_blade_stops_on_the_plate() {
-    let mut world = settle_shifted_cake(build_box_cake(0.05, 0.1, 0.05), Vec3::new(-0.3, 0.0, 0.0), -0.44);
+    // Centered 0.2 m out, the box reaches under the rim from 0.15 m out to 0.25 m.
+    let to_under_rim = Vec3::new(0.2 - CAKE_SPAWN.x as f32, 0.0, 0.0);
+    let mut world = settle_shifted_cake(build_box_cake(0.05, 0.1, 0.05), to_under_rim, -0.44);
     let plane = world.get_knife().calc_plane();
     let crossed = calc_split(world.get_cake_positions(), &world.get_model().mesh.triangles, &plane);
     assert!(crossed.above_m3 > 0.0 && crossed.below_m3 > 0.0, "{crossed:?}");
@@ -482,7 +505,9 @@ fn cake_grabbed_on_the_stand_by_its_rim_lifts_barely_and_keeps_its_orientation()
 
 #[test]
 fn turning_the_stand_stops_where_the_cake_meets_the_lowered_knife() {
-    let mut world = place_cake_on_stand();
+    // The placeholder on the stand 3 cm off its middle, which puts its missing slice under the knife.
+    let onto_stand = Vec3::new(0.03 - CAKE_SPAWN.x as f32, STAND_TOP_Y_M as f32, -CAKE_SPAWN.z as f32);
+    let mut world = settle_shifted_cake(build_slice_missing_cake(), onto_stand, 0.3);
     let tilt = quantize_radians(0.3);
     let mut input = Input { knife: KnifeInput { tilt, lower: quantize_meters(0.3) }, ..Input::default() };
     for _ in 0..120 {
@@ -539,9 +564,12 @@ fn held_cake_dragged_into_the_lowered_knife_is_not_pulled_through_the_blade() {
     let grab_at = [CAKE_SPAWN.x, 0.12, CAKE_SPAWN.z].map(quantize_meters);
     let across = [-0.3, 0.0].map(quantize_meters);
     let knife = KnifeInput { tilt: 0, lower: quantize_meters(0.2) };
+    // Lifted in place first, so the drag carries it high enough to clear the stand's rim and meet
+    // the blade, rather than catching on the rim and sliding around the blade's end.
+    let lift = Input { hand: Some(HandInput { grab_at, target_xz: [grab_at[0], grab_at[2]] }), knife, stand_angle: 0 };
     let carry = Input { hand: Some(HandInput { grab_at, target_xz: across }), knife, stand_angle: 0 };
-    for _ in 0..240 {
-        world.step(&carry);
+    for tick in 0..300 {
+        world.step(if tick < 60 { &lift } else { &carry });
     }
     let knife = world.get_knife();
     assert!((knife.lower_m - knife.rest_m - 0.2).abs() < 1e-9, "{knife:?}");
@@ -582,13 +610,13 @@ fn knife_rests_5_cm_above_the_top_of_a_cake_on_the_stand_as_it_is_posed() {
     assert!((tall_y_m - 0.37).abs() < 1e-6, "{tall_y_m}");
 }
 
-/// The box's flattest pose stands 0.04 m tall and its tallest, on a corner, 0.286 m, so the edge
-/// waits 5 cm above 0.163 m over the stand's top. The tallest pose is found along sampled
+/// The box's flattest pose stands 0.04 m tall and its tallest, on a corner, 0.230 m, so the edge
+/// waits 5 cm above 0.135 m over the stand's top. The tallest pose is found along sampled
 /// directions, hence the millimeter's slack.
 #[test]
 fn knife_waits_over_the_middle_of_a_cakes_flattest_and_tallest_heights_away_from_the_stand() {
-    let edge_y_m = calc_resting_edge_y_m(build_box_cake(0.1, 0.04, 0.1), TO_FAR_CORNER);
-    assert!((edge_y_m - 0.333).abs() < 1e-3, "{edge_y_m}");
+    let edge_y_m = calc_resting_edge_y_m(build_box_cake(0.08, 0.04, 0.08), TO_FAR_CORNER);
+    assert!((edge_y_m - 0.305).abs() < 1e-3, "{edge_y_m}");
 }
 
 #[test]
@@ -653,19 +681,18 @@ fn calc_blade_overlap_m(world: &World) -> f64 {
         return 0.0;
     }
     let shifted: Vec<DVec3> = positions.iter().map(|p| *p + plane.normal * shift_m).collect();
-    let cake = Solid { positions: &shifted, triangles: &world.get_model().mesh.triangles };
+    let cake = Solid::new(&shifted, &world.get_model().mesh.triangles);
     (knife.lower_m - knife.calc_lower_limit_m(&[cake])).max(0.0)
 }
 
-/// A pole standing at its tallest, picked up by its top, held for 40 ticks, then carried 0.52 m
-/// from where it spawns onto the stand's middle at 1 m/s under a blade tilted toward it. The
-/// rest's approach distance clears it, and a narrower one of 0.35 m does not.
+/// A pole standing at its tallest, picked up by its top, held for 40 ticks, then carried 0.44 m
+/// from where it spawns onto the stand's middle at 1 m/s under a blade tilted toward it.
 #[test]
 fn resting_knife_rises_clear_of_a_tall_cake_carried_onto_the_stand() {
     let mut world = World::create(build_box_cake(0.025, 0.25, 0.025), -MAX_TILT_RAD, None);
     let grab_at = [CAKE_SPAWN.x, 0.25, CAKE_SPAWN.z].map(quantize_meters);
     let knife = KnifeInput { tilt: quantize_radians(-MAX_TILT_RAD), lower: 0 };
-    let (hold_ticks, carry_ticks) = (40, 31);
+    let (hold_ticks, carry_ticks) = (40, 26);
     for tick in 0..5 * TICKS_PER_S as i32 {
         let progress = (tick - hold_ticks).clamp(0, carry_ticks) as f64 / carry_ticks as f64;
         let target_xz = [CAKE_SPAWN.x, CAKE_SPAWN.z].map(|m| quantize_meters(m * (1.0 - progress)));
@@ -723,6 +750,32 @@ fn grab_away_from_the_cake_is_ignored() {
         world.step(&input);
     }
     assert!(world.get_cake_pose().translation.distance(start) < 1e-3);
+}
+
+#[test]
+fn settled_lopsided_cake_grabbed_at_its_far_light_end_is_carried() {
+    // A thin bar with a heavy block on one end, like a guitar's neck and body, so the far end of the
+    // bar lies much farther from the center of mass than from the mesh's origin.
+    let bar = build_box([-0.12, 0.0, -0.01], [0.04, 0.01, 0.01]);
+    let block = build_box([0.04, 0.0, -0.04], [0.12, 0.06, 0.04]);
+    let hulls = vec![bar.positions.clone(), block.positions.clone()];
+    let offset = bar.positions.len() as u32;
+    let triangles =
+        bar.triangles.iter().copied().chain(block.triangles.iter().map(|t| t.map(|i| i + offset))).collect();
+    let mesh = Mesh { positions: [bar.positions, block.positions].concat(), triangles };
+    let mut world = World::create(CakeModel { mesh, skin: Skin::Plain, hulls }, START_TILT_RAD, None);
+    for _ in 0..60 {
+        world.step(&Input::default());
+    }
+    let tip = world.get_cake_pose().transform_point(Vec3::new(-0.115, 0.01, 0.0));
+    let start = world.get_cake_pose().translation;
+    let grab_at = [tip.x, tip.y, tip.z].map(|m| quantize_meters(m as f64));
+    let input = Input { hand: Some(HandInput { grab_at, target_xz: [0, 0] }), ..Input::default() };
+    for _ in 0..60 {
+        world.step(&input);
+    }
+    assert!(world.is_holding());
+    assert!(world.get_cake_pose().translation.distance(start) > 0.1);
 }
 
 #[test]

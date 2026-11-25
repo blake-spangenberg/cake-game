@@ -58,11 +58,10 @@ export class Controls {
   private sentLowerM = 0;
   /** The lowering sent the tick before last, to tell a knife still being pressed down from one at rest. */
   private prevSentLowerM = 0;
-  /** How far below the pivot the knife's edge was last tick. */
-  private knifeLowerM = 0;
-  /** The knife's edge direction and downward direction last tick. */
+  /** The knife's edge direction, downward direction, and edge middle as of last tick. */
   private readonly knifeEdge = new THREE.Vector3();
   private readonly knifeDown = new THREE.Vector3();
+  private readonly knifeEdgeMiddle = new THREE.Vector3();
   private readonly stand = new Spring(0, STAND_HALF_LIFE_S);
   private readonly handX = new Spring(0, HAND_HALF_LIFE_S);
   private readonly handZ = new Spring(0, HAND_HALF_LIFE_S);
@@ -91,9 +90,7 @@ export class Controls {
   }
 
   reset(game: Game): void {
-    const [knifeTiltRad, knifeLowerM] = game.get_knife_pose();
-    this.knifeLowerM = knifeLowerM;
-    this.readKnifeFrame(game);
+    const [knifeTiltRad] = this.readKnife(game);
     this.drag = null;
     this.tilt.snap(knifeTiltRad);
     this.sentTiltRad = knifeTiltRad;
@@ -104,19 +101,26 @@ export class Controls {
   }
 
   /**
+   * The input the server holds for a player it has heard nothing from since `game`'s tick 0, in
+   * the wire format `stepInput` returns: no hand, and the knife and stand where they start.
+   */
+  buildIdleInput(game: Game): Int32Array {
+    const encoded = new Int32Array(ENCODED_LEN);
+    encoded[6] = this.quantizeRad(game.get_knife_pose()[0]);
+    return encoded;
+  }
+
+  /**
    * Eases every input one tick and returns it in the core's wire format, `Input::encode` in
    * `src/core/src/input.rs`. A control the core stopped short last tick stops there.
    */
   stepInput(game: Game): Int32Array {
     const dtS = 1 / this.layout.ticks_per_s;
-    const [knifeTiltRad, knifeLowerM, knifeRestM] = game.get_knife_pose();
-    this.knifeLowerM = knifeLowerM;
-    this.readKnifeFrame(game);
+    const [knifeTiltRad, loweredM] = this.readKnife(game);
     if (Math.abs(knifeTiltRad - this.sentTiltRad) > this.layout.angle_unit_rad / 2) this.tilt.snap(knifeTiltRad);
     // Only a press is capped: a knife the core lifted over a bump while tilting keeps the
     // pressed lowering, so it settles back down past the bump.
     const isPressing = this.sentLowerM > this.prevSentLowerM;
-    const loweredM = knifeLowerM - knifeRestM;
     if (isPressing && loweredM < this.sentLowerM - this.layout.position_unit_m / 2) this.lower.capAt(loweredM + LOWER_SLACK_M);
     this.prevSentLowerM = this.sentLowerM;
     const standRad = game.get_stand_angle_rad();
@@ -205,19 +209,18 @@ export class Controls {
     return viewHeightM / this.scene.renderer.domElement.clientHeight;
   }
 
-  private readKnifeFrame(game: Game): void {
+  /** Reads the knife's frame for grabbing it, returning its tilt and how far it is lowered below its rest. */
+  private readKnife(game: Game): [number, number] {
+    const [tiltRad, lowerM, restM] = game.get_knife_pose();
     const frame = game.get_knife_frame();
     this.knifeEdge.fromArray(frame, 0);
     this.knifeDown.fromArray(frame, 3);
+    this.knifeEdgeMiddle.copy(this.getPivot()).addScaledVector(this.knifeDown, lowerM);
+    return [tiltRad, lowerM - restM];
   }
 
   private getPivot(): THREE.Vector3 {
     return new THREE.Vector3(0, this.layout.pivot_y_m, 0);
-  }
-
-  /** The point of the knife's edge midway along it, where it sits below the pivot. */
-  private getEdgeMiddle(): THREE.Vector3 {
-    return this.getPivot().addScaledVector(this.knifeDown, this.knifeLowerM);
   }
 
   /**
@@ -225,7 +228,7 @@ export class Controls {
    * knife floats, lowers, and tilts.
    */
   private buildKnifeDrag(point: THREE.Vector3): KnifeDrag {
-    const fromEdgeMiddle = point.clone().sub(this.getEdgeMiddle());
+    const fromEdgeMiddle = point.clone().sub(this.knifeEdgeMiddle);
     const drag: KnifeDrag = {
       kind: "knife",
       alongEdgeM: fromEdgeMiddle.dot(this.knifeEdge),
@@ -242,7 +245,7 @@ export class Controls {
    */
   private calcTiltSign(drag: KnifeDrag): number {
     const pivot = this.getPivot();
-    const grabbed = this.getEdgeMiddle().addScaledVector(this.knifeEdge, drag.alongEdgeM).addScaledVector(this.knifeDown, -drag.aboveEdgeM);
+    const grabbed = this.knifeEdgeMiddle.clone().addScaledVector(this.knifeEdge, drag.alongEdgeM).addScaledVector(this.knifeDown, -drag.aboveEdgeM);
     const tilted = grabbed.clone().sub(pivot).applyAxisAngle(this.knifeEdge, -PROBE_STEP).add(pivot);
     const travelPx = this.toClientPx(tilted).x - this.toClientPx(grabbed).x;
     return Math.abs(travelPx) < TILT_SIGN_MIN_TRAVEL_PX ? drag.tiltSign : Math.sign(travelPx);

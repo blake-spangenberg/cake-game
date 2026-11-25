@@ -1,16 +1,19 @@
 mod hand;
 mod setup;
 
+use std::sync::Arc;
+
 use rapier3d::glamx::DVec3;
 use rapier3d::prelude::*;
 
 use crate::cakes::CakeModel;
 use crate::cut::{Split, calc_split};
 use crate::input::{Input, KnifeInput, calc_radians};
-use crate::knife::{Knife, Solid, calc_rest_m, calc_sweep_reach};
+use crate::knife::{Knife, PosedTree, Solid, Turn, calc_rest_m, calc_sweep_reach};
 use crate::table::{CAKE_SPAWN, RESPAWN_BELOW_Y_M};
 use hand::Grip;
-use setup::{StandPlate, build_cake_shape, insert_cake, insert_knife, insert_stand, insert_table};
+pub use setup::Cake;
+use setup::{StandPlate, insert_cake, insert_knife, insert_stand, insert_table};
 
 pub const TICKS_PER_S: u32 = 60;
 /// A competitive round's length, at whose last tick the cut happens for anyone who has not cut.
@@ -32,12 +35,11 @@ const CAKE_FRICTION: f32 = 0.9;
 const ROLL_RESISTANCE_RAD_PER_S2: f32 = 80.0;
 /// Across this gap between the cake's bounding box and the stand's rim, the resting knife turns
 /// from waiting over the cake's middle height to following its height as posed. It reaches past
-/// where the cake spawns, so the knife there already partly follows, and leaves only the table's
-/// far ends and corners away. No gap the table allows lets the slow float rise clear of a cake
-/// carried in at its tallest at the hand's full speed. This one clears such a carry at up to
-/// about 0.5 m/s from anywhere on the table, and at 1 m/s from where the cake spawns, which at
-/// 0.35 m meets the blade.
-const REST_APPROACH_M: f64 = 0.4;
+/// where the cake spawns, so the knife there already partly follows, and leaves the table's far
+/// ends and corners away. No gap the table allows lets the slow float rise clear of a cake carried
+/// in at its tallest at the hand's full speed: this one clears such a carry at up to about 0.7 m/s
+/// from anywhere on the table.
+const REST_APPROACH_M: f64 = 0.32;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Phase {
@@ -61,12 +63,15 @@ pub struct World {
     stand_plate: StandPlate,
     knife_body: RigidBodyHandle,
     knife_colliders: Vec<ColliderHandle>,
-    model: CakeModel,
+    /// What this world shares with every other on the same cake.
+    shared: Arc<Cake>,
     bounding_radius_m: f64,
     /// Halfway between how tall the cake stands in its flattest and its tallest pose, which the
     /// knife rests over while the cake is away from the stand.
     waiting_height_m: f64,
     cake_positions: Vec<DVec3>,
+    /// The cake's pose as of `cake_positions`.
+    cake_positions_pose: Pose,
     /// Ticks since the cake fell off the table.
     fallen_ticks: u32,
     knife: Knife,
@@ -77,24 +82,26 @@ pub struct World {
 
 impl World {
     /// A world whose knife rests at `knife_tilt_rad` over the cake, and that cuts itself at
-    /// `round_ticks`, or never with `None`.
-    pub fn create(model: CakeModel, knife_tilt_rad: f64, round_ticks: Option<u32>) -> World {
+    /// `round_ticks`, or never with `None`. Passing a [`CakeModel`] builds its [`Cake`] for this
+    /// world alone.
+    pub fn create(shared: impl Into<Arc<Cake>>, knife_tilt_rad: f64, round_ticks: Option<u32>) -> World {
+        let shared = shared.into();
         let knife = Knife { tilt_rad: knife_tilt_rad, rest_m: 0.0, rest_lead_m: 0.0, lower_m: 0.0 };
         let mut physics = PhysicsWorld::new();
         physics.integration_parameters.dt = DT_S as f32;
         physics.integration_parameters.length_unit = LENGTH_UNIT_M;
         insert_table(&mut physics);
         let stand = insert_stand(&mut physics);
-        let cake = insert_cake(&mut physics, &model);
+        let cake = insert_cake(&mut physics, &shared);
         let hand = physics.insert_body(RigidBodyBuilder::kinematic_position_based());
         let (knife_body, knife_colliders) = insert_knife(&mut physics, &knife);
         let com = physics.bodies[cake].mass_properties().local_mprops.local_com;
-        let bounding_radius_m = model.mesh.calc_max_distance_from(com) as f64;
-        let (flattest_m, tallest_m) = model.mesh.calc_width_range_m();
+        let bounding_radius_m = shared.get_model().mesh.calc_max_distance_from(com) as f64;
+        let (flattest_m, tallest_m) = shared.width_range_m;
         let mut world = World {
             physics,
             cake,
-            cake_shape: build_cake_shape(&model),
+            cake_shape: shared.shape.clone(),
             hand,
             grip: None,
             stand,
@@ -103,10 +110,11 @@ impl World {
             stand_plate: StandPlate::build(),
             knife_body,
             knife_colliders,
-            model,
+            shared,
             bounding_radius_m,
             waiting_height_m: (flattest_m + tallest_m) / 2.0,
             cake_positions: Vec::new(),
+            cake_positions_pose: Pose::IDENTITY,
             fallen_ticks: 0,
             knife,
             tick: 0,
@@ -142,7 +150,8 @@ impl World {
         if let Phase::Cut { split, .. } = self.phase {
             return split;
         }
-        let mut split = calc_split(&self.cake_positions, &self.model.mesh.triangles, &self.knife.calc_plane());
+        let triangles = &self.shared.get_model().mesh.triangles;
+        let mut split = calc_split(&self.cake_positions, triangles, &self.knife.calc_plane());
         if !self.is_cut_through() {
             split = Split { above_m3: split.above_m3 + split.below_m3, below_m3: 0.0 };
         }
@@ -153,8 +162,7 @@ impl World {
     /// Whether a cut now would divide the cake, rather than miss it, stop on the stand above it,
     /// or end beside it.
     pub fn is_cut_through(&self) -> bool {
-        let cake = Solid { positions: &self.cake_positions, triangles: &self.model.mesh.triangles };
-        self.knife.is_cut_through(cake, self.calc_cut_lower_m())
+        self.knife.is_cut_through(self.as_cake_solid(), self.calc_cut_lower_m())
     }
 
     /// How far the knife would lower through the cake to the stand or table, for drawing the cut.
@@ -165,8 +173,7 @@ impl World {
     /// How far the knife lowers before its edge meets the cake, for keeping the halves together
     /// until the blade enters it.
     pub fn calc_cake_touch_lower_m(&self) -> f64 {
-        let cake = Solid { positions: &self.cake_positions, triangles: &self.model.mesh.triangles };
-        self.knife.calc_lower_limit_m(&[cake])
+        self.knife.calc_lower_limit_m(&[self.as_cake_solid()])
     }
 
     pub fn get_phase(&self) -> Phase {
@@ -182,7 +189,7 @@ impl World {
     }
 
     pub fn get_model(&self) -> &CakeModel {
-        &self.model
+        self.shared.get_model()
     }
 
     pub fn get_cake_pose(&self) -> Pose {
@@ -291,28 +298,30 @@ impl World {
             return to_rad;
         }
         let from_rad = self.stand_angle_rad;
-        let plate = self.stand_plate.as_solid();
+        let (cake, plate) = (self.as_cake_solid(), self.stand_plate.as_solid());
         calc_sweep_reach(from_rad, to_rad, |rad| {
-            let (sin, cos) = (libm::sin(rad - from_rad), libm::cos(rad - from_rad));
-            let turned: Vec<DVec3> = self
-                .cake_positions
-                .iter()
-                .map(|p| DVec3::new(p.x * cos + p.z * sin, p.y, p.z * cos - p.x * sin))
-                .collect();
-            let cake = Solid { positions: &turned, triangles: &self.model.mesh.triangles };
-            self.knife.is_clear_of(&[cake, plate])
+            let turned = Solid { turn: Some(Turn::calc(rad - from_rad)), ..cake };
+            self.knife.is_clear_of(&[turned, plate])
         })
     }
 
+    /// The cake as it is posed now, for the knife to stop on.
+    fn as_cake_solid(&self) -> Solid<'_> {
+        let pose = self.cake_positions_pose;
+        let (rotation, translation) = (pose.rotation.as_dquat(), pose.translation.as_dvec3());
+        let tree = PosedTree { tree: &self.shared.tree, rotation, translation };
+        Solid { tree: Some(tree), ..Solid::new(&self.cake_positions, &self.shared.get_model().mesh.triangles) }
+    }
+
     fn step_knife(&mut self, input: &KnifeInput) {
-        let cake = Solid { positions: &self.cake_positions, triangles: &self.model.mesh.triangles };
-        let plate = self.stand_plate.as_solid();
+        let mut knife = self.knife;
+        knife.float_over(self.calc_rest_height_m(), DT_S);
+        let (cake, plate) = (self.as_cake_solid(), self.stand_plate.as_solid());
         // A held cake meets the knife's collider instead, so the blade holds its place against it.
         let solids: &[Solid] = if self.grip.is_some() { &[plate] } else { &[cake, plate] };
-        self.knife.float_over(self.calc_rest_height_m(), DT_S);
-        self.knife.step(input, solids);
-        let pose = Pose::from_parts(self.knife.calc_edge_middle().as_vec3(), self.knife.calc_rotation());
-        self.physics.bodies[self.knife_body].set_next_kinematic_position(pose);
+        knife.step(input, solids);
+        self.knife = knife;
+        self.physics.bodies[self.knife_body].set_next_kinematic_position(self.knife.calc_pose());
     }
 
     /// The cake height the knife rests over: the cake's as posed at the stand, easing to its
@@ -353,8 +362,10 @@ impl World {
         let pose = *self.physics.bodies[self.cake].position();
         let rotation = pose.rotation.as_dquat();
         let translation = pose.translation.as_dvec3();
+        self.cake_positions_pose = pose;
         self.cake_positions.clear();
-        self.cake_positions.extend(self.model.mesh.positions.iter().map(|p| rotation * p.as_dvec3() + translation));
+        let positions = &self.shared.get_model().mesh.positions;
+        self.cake_positions.extend(positions.iter().map(|p| rotation * p.as_dvec3() + translation));
     }
 }
 

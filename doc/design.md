@@ -10,32 +10,34 @@ The game is intuitive, since it depicts a scenario that could exist in the real 
 - The game runs in a browser tab opened from a link posted in the Zoom chat. No installs, accounts, or controllers.
 - It is not a Zoom App: publishing one for guests outside the host's Zoom account takes Zoom's Marketplace review (4-12 weeks), and guest mode only reaches invited, unauthenticated participants. The web build stays runnable inside Zoom's embedded browser (WebView2) so a Zoom App stays possible later.
 - Players join late and near instantly: a late joiner spectates the round in progress and plays the next one.
-- Nothing carries over between rounds: no leaderboard history, no stored player identity.
+- Nothing carries over between rounds: no leaderboard history, no stored player identity. The one exception is a player's seat: a page that closes or loses its connection can reopen into its own seat, mid-round included, until that player has been inactive for 1 hour.
 
 ## Lobby
-- The first player to open the link is the host. If the host leaves, the role passes to another player.
+- No one hosts by default. Any player in the lobby can claim host with a button and a password, `greylag`, even from a host still present. When the host leaves or expires, the seat stays vacant until someone claims it.
 - Every player types a name before joining. This is the one place the game requires the keyboard.
-- The host picks the round's cake from a scrollable view of model previews, not a text list, preset to Random, then presses Start.
+- The host picks the round's cake from a scrollable view of model previews, not a text list, preset to Random, then presses Start. Previews are ordered by kind of object, with no group titles. Picking Random settles on one cake at once, never rerolled at Start. Every page downloads the picked cake in the lobby without showing it, so the round starts without a load.
+- The lobby panel sits over a still table, with no playable cake behind it.
 - A "How to play" card stays visible so players learn while the lobby fills:
     - Click and drag the cake onto the cake stand
     - Adjust the rotation of the cake stand and the angle of the knife to line up the perfect cut
     - Press Cut! to lock in, cutting your cake in half
     - The winner is the player whose halves are most similar by weight
-- A credits page, reachable from the lobby only, says the game is inspired by the German game show Schlag den Henssler, lists the license credits for every sourced asset and every open-source library the game ships, and names the author, Blake Spangenberg.
+- A credits page, reachable from the lobby only, says the game is inspired by the German game show Schlag den Henssler, lists the license credits for every sourced asset and every open-source library the game ships, and names the author, Blake Spangenberg. It names the main libraries (three.js, Rapier, nalgebra, wasm-bindgen) and links the full list.
 - Each cake has a short in-game name the owner sets (Croissant, Grand Piano), not its source's title. Its credit line names the model's author, linked to the model's page, and its license, linked to the license's terms.
-- After the results, everyone returns to the lobby for the next round.
+- The results stay up until the host presses Return to Lobby, which brings everyone back for the next round.
 
 ## Fairness
 - All players get the same time, cake, knife, and starting positions. The cut is deterministic given the cake's and knife's poses.
 - Each player has 30 seconds to cut. When time runs out, the game presses `Cut!` for the player, and that cut is judged like any other.
-- The countdown is a pie that slowly loses area. A red numeric timer appears only in the last 10 seconds, ticking audibly on each update. A whistle blows at 0 seconds or when the last player cuts.
+- A round never waits on one player. A player who leaves mid-round is cut at the deadline and judged like anyone else. A player who switches to another tab lets go of the cake and the knife, as if they released the mouse, and their game catches up when they return. A round starts on time, and a page that has not loaded the cake within 10 seconds sits that round out as a spectator.
+- The countdown is a pie that slowly loses area, shown to spectators too. A red numeric timer appears only in the last 10 seconds, ticking audibly on each update. A whistle blows at 0 seconds or when the last player cuts.
 - Controls and measurement are precise enough that there are no ties. Only identical cuts tie, and the earlier cut wins. Players who never touched the controls share their rank.
 
 ## Controls
 - Mouse only: no keyboard input is required during play. Dragging anywhere else swings the camera around the table's center and the wheel zooms. Arrow keys and WASD also swing it, as a second-class option.
 - Prefer diegetic information. Words, numbers, and instructions are a last resort.
 - The knife is a mezzaluna whose cut plane always passes through a fixed point above the cutting region, a cake stand the player sets the cake on. Dragging the knife tilts it with the mouse's left/right travel and lowers it toward the cake with up/down travel to check the line. The grabbed point follows the mouse's left/right travel on screen, so dragging the blade rather than a handle reverses the direction, and neither ever feels backwards. Lowering stops at the cake's surface without pushing it, eases back up when the player lets go, and never cuts. The knife never turns: the player turns the cake stand instead.
-- The knife rests high enough that a player positioning the cake reasonably never hits it by accident, yet close enough to stay in view while zoomed in on the cake. It floats up and down with the cake's current height: close above a cake set flat, 5 cm clear of it, and backing away as a cake held on its side grows taller. It follows the cake only as the cake approaches the stand, starting from well out and easing into the following along a gentle S-curve. While the cake is away, it waits over the height halfway between the cake's flattest and tallest poses. It floats slowly and arrives without overshooting. It floats by sliding along its own blade, so the cut line never shifts as it floats, and it always tilts about the same high point.
+- The knife rests high enough that a player positioning the cake reasonably never hits it by accident, yet close enough to stay in view while zoomed in on the cake. It floats up and down with the cake's current height: close above a cake set flat, 5 cm clear of it, and backing away as a cake held on its side grows taller. It follows the cake only as the cake approaches the stand, starting from well out and easing into the following along a gentle S-curve. While the cake is away, it waits over the height halfway between the cake's flattest and tallest poses. It floats slowly and arrives without overshooting, even though a tall cake carried briskly onto the stand can then bump the rising blade: the float never hurries to dodge it. It floats by sliding along its own blade, so the cut line never shifts as it floats, and it always tilts about the same high point.
 - A cake still on the table can be cut too. Wherever the blade reaches any part of a cake, the whole cake splits along the cut plane, even the parts the blade does not reach, such as a cake past the blade's tip or the part below the stand's plate.
 - Every control moves relative to where its drag started, eased through springs.
 - A big, obvious `Cut!` button, clearly separated from the other controls, freezes time, physics, and input and cuts at once along the knife's current pose, so a cake still settling is cut as it is at that instant.
@@ -69,7 +71,7 @@ The reveal is dramatic, with pomp and circumstance, and is worth a round running
 
 ## Cakes
 - Every round uses one of several cakes.
-- Cakes are sourced 3D models rather than generated ones, since they are the star of the show and a generated asset dulls the impression. Models must be free (CC0 or CC-BY), with credits shown in game. The owner picks each model from a shortlist, and decides the set's size at pick time.
+- Cakes are sourced 3D models rather than generated ones, since they are the star of the show and a generated asset dulls the impression. Models must be free (CC0, CC-BY, or CC-BY-NC, since the game is never sold), with credits shown in game. The owner picks each model from a shortlist, and decides the set's size at pick time. An animated model is frozen at a pose the owner picks.
 - The set mixes smooth stylized, mid-poly models and photoreal scans, never low-poly or flat-shaded. A model's texture keeps its source's detail (a logo, stitching, a knit) rather than a blurred average of it.
 - A model must look right at cake size: not so flat it reads as a slab, not built for a much smaller scale so its facets show, and not filled in solid where its real counterpart is hollow (the inside of a shoe).
 - Every cake is a whole object. Nothing already sliced, bitten, or cut, real cakes included: the first cut the player sees is their own.
@@ -96,4 +98,4 @@ The reveal is dramatic, with pomp and circumstance, and is worth a round running
 
 ## Constraints
 - Prefer a self-hosted multiplayer server, and generally minimize vendor reliance. The server runs on the developer's home machine and is reachable over HTTPS at `cake.bspang.net` by guests outside the company.
-- The game must be performant. Prefer performance over saving power, but not for gains no player would notice.
+- The game must be performant. Prefer performance over saving power, but not for gains no player would notice. On the developer's PC, frames take under about 16 ms (60 fps), and no single hitch, such as a cut or a round swap, lasts over about 100 ms.

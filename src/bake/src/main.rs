@@ -53,7 +53,8 @@ fn bake(source: &str, destination: &str) -> Result<String, String> {
 }
 
 /// The glb vertex attribute holding, for each vertex, the index of the closed solid's vertex it
-/// copies. `tools/repair-model.py` writes it.
+/// copies. `tools/repair-model.py` writes it as `_SOLID_VERTEX`, and `gltf` strips the leading `_`
+/// that marks a custom attribute.
 const SOLID_VERTEX_ATTRIBUTE: &str = "SOLID_VERTEX";
 
 /// The one triangle mesh of a repaired glb, rejoined into the closed solid its texture seams split,
@@ -72,9 +73,7 @@ fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Skin), String> {
     let reader = primitive.reader(|_| blob);
     let split_positions: Vec<[f32; 3]> = reader.read_positions().ok_or("the mesh has no positions")?.collect();
     let indices: Vec<u32> = reader.read_indices().ok_or("the mesh has no indices")?.into_u32().collect();
-    if !indices.len().is_multiple_of(3) {
-        return Err("the index count is not a multiple of 3".into());
-    }
+    let split_triangles = to_triangles(&indices, split_positions.len())?;
     let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0).ok_or("the mesh has no UVs")?.into_f32().collect();
     let solid_accessor = primitive
         .get(&gltf::Semantic::Extras(SOLID_VERTEX_ATTRIBUTE.into()))
@@ -85,6 +84,15 @@ fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Skin), String> {
     if uvs.len() != split_positions.len() || solid_ids.len() != split_positions.len() {
         return Err("the mesh does not have one UV and one solid vertex id per vertex".into());
     }
+    let image = find_image(&glb)?;
+    let positions = rejoin(&split_positions, &solid_ids)?;
+    let triangles = split_triangles.iter().map(|corners| corners.map(|idx| solid_ids[idx])).collect();
+    let corner_uvs = split_triangles.iter().map(|corners| corners.map(|idx| quantize_uv(uvs[idx]))).collect();
+    Ok((Mesh { positions, triangles }, Skin::Textured { corner_uvs, image: image.to_vec() }))
+}
+
+/// The glb's one image, which must be stored in its binary chunk.
+fn find_image(glb: &gltf::Gltf) -> Result<&[u8], String> {
     let mut images = glb.images();
     let (Some(image), None) = (images.next(), images.next()) else {
         return Err("expected exactly one image; run tools/repair-model.py first".into());
@@ -92,14 +100,19 @@ fn fetch_mesh(bytes: &[u8]) -> Result<(Mesh, Skin), String> {
     let gltf::image::Source::View { view, .. } = image.source() else {
         return Err("the image is not stored in the glb".into());
     };
-    let image =
-        blob.and_then(|blob| blob.get(view.offset()..view.offset() + view.length())).ok_or("the image is missing")?;
-    let positions = rejoin(&split_positions, &solid_ids)?;
-    let split_triangles: Vec<[usize; 3]> =
-        indices.chunks_exact(3).map(|corners| [0, 1, 2].map(|k| corners[k] as usize)).collect();
-    let triangles = split_triangles.iter().map(|corners| corners.map(|idx| solid_ids[idx])).collect();
-    let corner_uvs = split_triangles.iter().map(|corners| corners.map(|idx| quantize_uv(uvs[idx]))).collect();
-    Ok((Mesh { positions, triangles }, Skin::Textured { corner_uvs, image: image.to_vec() }))
+    let range = view.offset()..view.offset() + view.length();
+    glb.blob.as_deref().and_then(|blob| blob.get(range)).ok_or_else(|| "the image is missing".into())
+}
+
+/// The triangles `indices` lists, three corners each, every corner one of `vertex_len` vertices.
+fn to_triangles(indices: &[u32], vertex_len: usize) -> Result<Vec<[usize; 3]>, String> {
+    let (triangles, []) = indices.as_chunks::<3>() else {
+        return Err("the index count is not a multiple of 3".into());
+    };
+    if indices.iter().any(|&idx| idx as usize >= vertex_len) {
+        return Err(format!("a triangle names a vertex past the mesh's {vertex_len}"));
+    }
+    Ok(triangles.iter().map(|corners| corners.map(|corner| corner as usize)).collect())
 }
 
 /// The solid's vertex positions, from the split vertices that copy them: `solid_ids` must name
@@ -218,6 +231,37 @@ mod tests {
         let simplified = simplify_hull(&sphere).unwrap();
         assert!(simplified.len() <= MAX_HULL_VERTICES);
         assert!(calc_hull_volume(&simplified).unwrap() > 0.8 * calc_hull_volume(&sphere).unwrap());
+    }
+
+    #[test]
+    fn seam_copies_rejoin_into_the_solid_vertex_they_name() {
+        let split_positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+        assert_eq!(rejoin(&split_positions, &[0, 1, 0]), Ok(vec![Vec3::ZERO, Vec3::X]));
+    }
+
+    #[test]
+    fn two_sheets_at_one_place_stay_apart_when_they_name_different_solid_vertices() {
+        let split_positions = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+        assert_eq!(rejoin(&split_positions, &[0, 1]), Ok(vec![Vec3::ZERO, Vec3::ZERO]));
+    }
+
+    #[test]
+    fn seam_copies_that_disagree_on_their_position_are_refused() {
+        let error = rejoin(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], &[0, 0]).unwrap_err();
+        assert!(error.contains("disagree"), "{error}");
+    }
+
+    #[test]
+    fn a_solid_vertex_no_copy_names_is_refused() {
+        let error = rejoin(&[[0.0, 0.0, 0.0]], &[1]).unwrap_err();
+        assert!(error.contains("solid vertex 0"), "{error}");
+    }
+
+    #[test]
+    fn indices_group_into_triangles_of_existing_vertices() {
+        assert_eq!(to_triangles(&[0, 1, 2, 2, 1, 0], 3), Ok(vec![[0, 1, 2], [2, 1, 0]]));
+        assert!(to_triangles(&[0, 1], 3).is_err());
+        assert!(to_triangles(&[0, 1, 3], 3).is_err(), "vertex 3 is past the end");
     }
 
     #[test]

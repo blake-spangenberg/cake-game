@@ -202,6 +202,12 @@ impl Game {
     pub fn get_cake_mesh_triangles(&self) -> Vec<u32> {
         self.world.get_model().mesh.triangles.iter().flatten().copied().collect()
     }
+
+    /// Each cake mesh triangle corner's unit normal, flattened in triangle order, smooth but for
+    /// creases sharper than `crease_rad` (`Mesh::calc_corner_normals`).
+    pub fn calc_cake_corner_normals(&self, crease_rad: f32) -> Vec<f32> {
+        self.world.get_model().mesh.calc_corner_normals(crease_rad).iter().flat_map(|n| n.to_array()).collect()
+    }
 }
 
 fn to_result(split: &Split) -> Vec<f64> {

@@ -8,10 +8,10 @@
   </head>
   <body>
     <canvas id="view"></canvas>
+    <div id="opponents" hidden><canvas></canvas></div>
     <div id="cake-menu">
       <select id="cake-picker" aria-label="Cake"></select>
       <div id="credit"></div>
-      <button id="show-credits">Credits</button>
     </div>
     <dialog id="credits">
       <h1>Cake Cut</h1>
@@ -19,15 +19,55 @@
       <p>By Blake Spangenberg.</p>
       <h2>Cakes</h2>
       <div id="cake-credits"></div>
-      <form method="dialog"><button>Close</button></form>
+      <h2>Libraries</h2>
+      <div id="library-credits"></div>
+      <form method="dialog"><button autofocus>Close</button></form>
     </dialog>
-    <div id="clock"></div>
+    <div id="clock" hidden>
+      <div class="clock-pie"></div>
+      <div class="clock-seconds" hidden></div>
+    </div>
     <button id="cut">Cut!</button>
     <div id="result" hidden>
       <div id="grams"></div>
       <div id="score"></div>
       <button id="again">Again</button>
     </div>
+    <dialog id="join">
+      <form>
+        <h1>Cake Cut</h1>
+        <label for="name">Your name</label>
+        <input id="name" autocomplete="nickname" spellcheck="false" required />
+        <button>Join</button>
+      </form>
+    </dialog>
+    <aside id="lobby" hidden>
+      <h1>Cake Cut</h1>
+      <section id="how-to-play">
+        <h2>How to play</h2>
+        <ul>
+          <li>Click and drag the cake onto the cake stand</li>
+          <li>Adjust the rotation of the cake stand and the angle of the knife to line up the perfect cut</li>
+          <li>Press Cut! to lock in, cutting your cake in half</li>
+          <li>The winner is the player whose halves are most similar by weight</li>
+        </ul>
+      </section>
+      <section>
+        <h2>Players</h2>
+        <ul id="players"></ul>
+      </section>
+      <section id="standings-card" hidden>
+        <h2>Results</h2>
+        <ol id="standings"></ol>
+      </section>
+      <p id="lobby-status"></p>
+      <section id="cake-pick" hidden>
+        <h2>Pick the cake</h2>
+        <div id="cake-tiles"></div>
+        <button id="start">Start</button>
+      </section>
+      <a id="credits-link" href="#credits">Credits</a>
+    </aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

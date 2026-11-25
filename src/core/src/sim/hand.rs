@@ -16,7 +16,7 @@ const HAND_EASE_PER_TICK: f64 = 0.1;
 const CARRY_CLEARANCE_M: f64 = 0.01;
 /// Across this gap between a carried cake and the stand's rim, most of the table, the height it
 /// clears eases from the table's up to the stand's.
-const STAND_APPROACH_M: f64 = 0.5;
+const STAND_APPROACH_M: f64 = 0.4;
 /// How high the hand lifts a cake grabbed while resting on the stand, so the plate still bears
 /// its far side and a gentle slide keeps its orientation.
 const STAND_LIFT_M: f64 = 0.01;

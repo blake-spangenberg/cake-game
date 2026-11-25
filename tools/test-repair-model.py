@@ -27,11 +27,10 @@ _TEST_TEXTURE_SIZE = 128
 _HOLLOW = _repair_module.Hollow(wall_m=0.02, floor_m=0.05, voxel_m=0.004)
 
 
-def _write_box(path: Path, extents: tuple[float, float, float], center: tuple[float, float, float]) -> Path:
+def _box(extents: tuple[float, float, float], center: tuple[float, float, float]) -> trimesh.Trimesh:
     box = trimesh.creation.box(extents=extents)
     box.apply_translation(center)
-    box.export(path, file_type="glb")
-    return path
+    return box
 
 
 def _write_scene(path: Path, meshes: list[trimesh.Trimesh]) -> Path:
@@ -39,14 +38,30 @@ def _write_scene(path: Path, meshes: list[trimesh.Trimesh]) -> Path:
     return path
 
 
-def _box(extents: tuple[float, float, float], center: tuple[float, float, float]) -> trimesh.Trimesh:
-    box = trimesh.creation.box(extents=extents)
-    box.apply_translation(center)
-    return box
+def _write_box(path: Path, extents: tuple[float, float, float], center: tuple[float, float, float]) -> Path:
+    return _write_scene(path, [_box(extents, center)])
 
 
-def _repair(source: Path, destination: Path, should_keep_largest: bool = False, **options: object):
+def _write_manifold(path: Path, solid: manifold3d.Manifold) -> Path:
+    mesh = solid.to_mesh()
+    return _write_scene(path, [trimesh.Trimesh(mesh.vert_properties[:, :3], mesh.tri_verts)])
+
+
+def _repair(source: Path, destination: Path, should_keep_largest: bool = False, **options: object) -> _repair_module.Repaired:
     return _repair_module.repair_model(source, destination, 0.2, should_keep_largest, **{"texture_size": _TEST_TEXTURE_SIZE, **options})
+
+
+def _texture_of(repaired: _repair_module.Repaired) -> np.ndarray:
+    return np.asarray(repaired.textured.visual.material.baseColorTexture.convert("RGB")).astype(int)
+
+
+def _sample_baked(repaired: _repair_module.Repaired, points: np.ndarray) -> np.ndarray:
+    """The baked texture's sRGB color at the repaired surface's point nearest each of `points`."""
+    textured = repaired.textured
+    closest, _, face_ids = trimesh.proximity.closest_point(textured, points)
+    bary = trimesh.triangles.points_to_barycentric(textured.triangles[face_ids], closest)
+    uvs = np.einsum("ni,nij->nj", bary, textured.visual.uv[textured.faces[face_ids]])
+    return np.round(_repair_module.sample_bilinear(textured.visual.material.baseColorTexture, uvs)).astype(int)
 
 
 def test_box_comes_out_scaled_and_resting_on_the_table_centered_on_the_stand(tmp_path: Path) -> None:
@@ -78,9 +93,66 @@ def test_two_separate_boxes_are_rejected_unless_the_largest_is_asked_for(tmp_pat
     assert np.allclose(_repair(source, tmp_path / "out.glb", True).solid.extents, [0.2, 0.1, 0.1], atol=1e-4)
 
 
+def test_a_leg_modeled_a_hair_short_of_the_body_it_holds_up_joins_it(tmp_path: Path) -> None:
+    # The leg's top stops one weld step, a ten-thousandth of the 2-unit longest side, under the top.
+    top = _box((2.0, 0.5, 1.0), (0.0, 1.25, 0.0))
+    leg = _box((0.2, 1.0, 0.2), (0.0, 0.5 - 2e-4, 0.0))
+    solid = _repair(_write_scene(tmp_path / "table.glb", [top, leg]), tmp_path / "out.glb").solid
+    assert len(solid.split(only_watertight=False)) == 1
+    scale = 0.2 / 2.0
+    assert solid.volume == pytest.approx((1.0 + 0.04) * scale**3, rel=1e-3)
+
+
+def test_a_leg_three_weld_steps_short_of_the_body_stays_a_separate_piece(tmp_path: Path) -> None:
+    top = _box((2.0, 0.5, 1.0), (0.0, 1.25, 0.0))
+    leg = _box((0.2, 1.0, 0.2), (0.0, 0.5 - 6e-4, 0.0))
+    with pytest.raises(click.ClickException, match="2 separate pieces"):
+        _repair(_write_scene(tmp_path / "table.glb", [top, leg]), tmp_path / "out.glb")
+
+
+def test_trimming_below_a_height_share_cuts_away_the_legs_and_leaves_a_flat_bottom(tmp_path: Path) -> None:
+    # The model is 1.5 tall, so a cut at 0.7 of its height, y = 1.05, takes the legs and 0.05 of the top.
+    top = _box((2.0, 0.5, 1.0), (0.0, 1.25, 0.0))
+    legs = [_box((0.2, 1.1, 0.2), (x, 0.55, 0.0)) for x in (-0.8, 0.8)]
+    solid = _repair(_write_scene(tmp_path / "table.glb", [top, *legs]), tmp_path / "out.glb", trim_below_share=0.7).solid
+    scale = 0.2 / 2.0
+    assert np.allclose(solid.extents, [0.2, 0.45 * scale, 0.1], atol=1e-4)
+    assert solid.volume == pytest.approx(2.0 * 0.45 * 1.0 * scale**3, rel=1e-3)
+
+
 def test_a_speck_floating_beside_the_model_is_dropped(tmp_path: Path) -> None:
     source = _write_scene(tmp_path / "speck.glb", [_box((2.0, 1.0, 1.0), (0.0, 0.0, 0.0)), _box((0.1, 0.1, 0.1), (5.0, 0.0, 0.0))])
     assert np.allclose(_repair(source, tmp_path / "out.glb").solid.extents, [0.2, 0.1, 0.1], atol=1e-4)
+
+
+def test_a_sealed_void_inside_the_model_is_filled(tmp_path: Path) -> None:
+    cube = manifold3d.Manifold.cube
+    source = _write_manifold(tmp_path / "void.glb", cube((1.0, 1.0, 1.0), center=True) - cube((0.5, 0.5, 0.5), center=True))
+    assert _repair(source, tmp_path / "out.glb").solid.volume == pytest.approx(0.2**3, rel=1e-3)
+
+
+def _open_fin(width: float, height: float, center: tuple[float, float, float]) -> trimesh.Trimesh:
+    """A thin open sheet bent into a shallow V, as trim such as a fish's fin is modeled."""
+    xs = np.linspace(-width / 2, width / 2, 9)
+    ys = np.linspace(-height / 2, height / 2, 9)
+    grid_x, grid_y = np.meshgrid(xs, ys, indexing="ij")
+    vertices = np.stack([grid_x.ravel(), grid_y.ravel(), 0.05 * np.abs(grid_x.ravel())], axis=1) + center
+    idx = np.arange(81).reshape(9, 9)
+    corners = idx[:-1, :-1].ravel(), idx[1:, :-1].ravel(), idx[1:, 1:].ravel(), idx[:-1, 1:].ravel()
+    faces = np.concatenate([np.stack([corners[0], corners[1], corners[2]], axis=1), np.stack([corners[0], corners[2], corners[3]], axis=1)])
+    return trimesh.Trimesh(vertices, faces, process=False)
+
+
+def test_a_thin_open_piece_that_will_not_close_is_dropped_as_trim(tmp_path: Path) -> None:
+    source = _write_scene(tmp_path / "fin.glb", [_box((2.0, 1.0, 1.0), (0.0, 0.0, 0.0)), _open_fin(0.5, 0.5, (1.5, 0.0, 0.0))])
+    assert np.allclose(_repair(source, tmp_path / "out.glb").solid.extents, [0.2, 0.1, 0.1], atol=1e-4)
+
+
+def test_an_open_piece_that_will_not_close_becomes_its_convex_hull_when_asked(tmp_path: Path) -> None:
+    # The fin reaches 0.45 past the box's end, so its hull lengthens the model from 2 to 2.45.
+    source = _write_scene(tmp_path / "fin.glb", [_box((2.0, 1.0, 1.0), (0.0, 0.0, 0.0)), _open_fin(0.5, 0.5, (1.2, 0.0, 0.0))])
+    solid = _repair(source, tmp_path / "out.glb", should_hull_open=True).solid
+    assert solid.extents[0] / solid.extents[1] == pytest.approx(2.45, rel=1e-3)
 
 
 def test_a_model_over_the_triangle_budget_is_decimated_to_one_closed_solid_of_nearly_its_volume(tmp_path: Path) -> None:
@@ -88,6 +160,18 @@ def test_a_model_over_the_triangle_budget_is_decimated_to_one_closed_solid_of_ne
     solid = _repair(source, tmp_path / "out.glb", max_triangles=2000).solid
     assert len(solid.faces) <= 2100
     assert solid.is_watertight and solid.is_winding_consistent
+    assert solid.volume == pytest.approx(4 / 3 * np.pi * 0.1**3, rel=0.02)
+
+
+def test_a_decimation_that_breaks_the_shape_gives_way_to_simplifying_within_a_tolerance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # fast-simplification once grew a piano's volume by half and threw a sheet past its bounds.
+    def swell(mesh: trimesh.Trimesh, face_count: int) -> trimesh.Trimesh:
+        return trimesh.creation.icosphere(subdivisions=2, radius=2.0)
+
+    monkeypatch.setattr(trimesh.Trimesh, "simplify_quadric_decimation", swell)
+    source = _write_scene(tmp_path / "sphere.glb", [trimesh.creation.icosphere(subdivisions=5)])
+    solid = _repair(source, tmp_path / "out.glb", max_triangles=2000).solid
+    assert len(solid.faces) <= 2000
     assert solid.volume == pytest.approx(4 / 3 * np.pi * 0.1**3, rel=0.02)
 
 
@@ -113,11 +197,30 @@ def test_hollowing_leaves_walls_and_a_floor_of_the_asked_thickness(tmp_path: Pat
 
 def test_hollowing_opens_into_a_narrow_opening_instead_of_walling_it_off(tmp_path: Path) -> None:
     block = manifold3d.Manifold.cube((1.0, 1.0, 1.0), center=True) - manifold3d.Manifold.cube((0.3, 0.6, 0.3), center=True).translate((0.0, 0.4, 0.0))
-    mesh = block.to_mesh()
-    source = _write_scene(tmp_path / "well.glb", [trimesh.Trimesh(mesh.vert_properties[:, :3], mesh.tri_verts)])
-    solid = _repair(source, tmp_path / "out.glb", hollow=_HOLLOW).solid
+    solid = _repair(_write_manifold(tmp_path / "well.glb", block), tmp_path / "out.glb", hollow=_HOLLOW).solid
     assert len(solid.split(only_watertight=False)) == 1, "an inner surface apart from the outer one would be a sealed void"
     assert solid.volume < 0.6 * 0.2**3
+
+
+def test_hollowing_keeps_attached_a_part_its_walls_alone_would_cut_free(tmp_path: Path) -> None:
+    # An island on top of a block, ringed by a moat narrow enough to be bridged over. Walls measured
+    # from the bridged top end at the moat's floor, so they alone would leave the island's top loose.
+    cube = manifold3d.Manifold.cube
+    moat = cube((0.4, 0.15, 0.4), center=True) - cube((0.3, 0.15, 0.3), center=True)
+    source = _write_manifold(tmp_path / "moat.glb", cube((1.0, 1.0, 1.0), center=True) - moat.translate((0.0, 0.425, 0.0)))
+    solid = _repair(source, tmp_path / "out.glb", hollow=_HOLLOW).solid
+    assert len(solid.split(only_watertight=False)) == 1
+    assert solid.volume < 0.7 * 0.2**3, "the rest of the block is still hollowed"
+
+
+def test_hollowing_paints_the_walls_it_carves_with_the_inside_color(tmp_path: Path) -> None:
+    box = _box((1.0, 1.0, 1.0), (0.0, 0.0, 0.0)).subdivide().subdivide()
+    box.visual.vertex_colors = np.tile([200, 0, 0, 255], (len(box.vertices), 1)).astype(np.uint8)
+    hollow = _HOLLOW._replace(inside_color=(0, 150, 0))
+    repaired = _repair(_write_scene(tmp_path / "red.glb", [box]), tmp_path / "out.glb", hollow=hollow)
+    carved_floor, outer_side = _sample_baked(repaired, np.array([[0.0, 0.06, 0.0], [0.1, 0.1, 0.0]]))
+    assert np.abs(carved_floor - [0, 150, 0]).max() <= 2
+    assert np.abs(outer_side - [200, 0, 0]).max() <= 2
 
 
 def _box_colored_by_facing(down_color: list[int], other_color: list[int]) -> trimesh.Trimesh:
@@ -144,19 +247,6 @@ def test_recoloring_turns_saturated_colors_and_leaves_grays(tmp_path: Path) -> N
     red_side, white_side = _sample_baked(repaired, np.array([[0.08, 0.05, 0.0], [-0.08, 0.05, 0.0]]))
     assert np.abs(red_side - [0, 128, 0]).max() <= 4
     assert np.abs(white_side - [255, 255, 255]).max() <= 2
-
-
-def _texture_of(repaired) -> np.ndarray:
-    return np.asarray(repaired.textured.visual.material.baseColorTexture.convert("RGB")).astype(int)
-
-
-def _sample_baked(repaired, points: np.ndarray) -> np.ndarray:
-    """The baked texture's sRGB color at the repaired surface's point nearest each of `points`."""
-    textured = repaired.textured
-    closest, _, face_ids = trimesh.proximity.closest_point(textured, points)
-    bary = trimesh.triangles.points_to_barycentric(textured.triangles[face_ids], closest)
-    uvs = np.einsum("ni,nij->nj", bary, textured.visual.uv[textured.faces[face_ids]])
-    return np.round(_repair_module.sample_bilinear(textured.visual.material.baseColorTexture, uvs)).astype(int)
 
 
 def test_a_source_with_no_colors_comes_out_one_uniform_color(tmp_path: Path) -> None:

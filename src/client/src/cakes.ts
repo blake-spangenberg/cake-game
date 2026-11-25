@@ -1,49 +1,58 @@
+/** The groups the cake picker lists cakes under, in the order it shows them. */
+export const CAKE_KINDS = ["Food", "Shoes", "Gloves", "Instruments", "Furniture", "Figures", "Animals", "Nature"] as const;
+export type CakeKind = (typeof CAKE_KINDS)[number];
+
 /**
  * A sourced cake model: its baked file in `build/public/cakes/` (unpacked by `make cakes` from `assets/cakes/`),
- * the name players see, the credit its license requires, and how `tools/bake-cakes.mjs` bakes it.
+ * the name players see, the credit its license requires, and how `tools/bake-cakes.sh` bakes it.
  */
 export interface CakeEntry {
   /** The model's Sketchfab id, which names its baked file and its page. */
   id: string;
   /** What the game calls the cake. */
   name: string;
+  /** The group the cake picker lists it under. */
+  kind: CakeKind;
   /** The Sketchfab user to credit. */
   author: string;
   license: LicenseName;
-  /** Options for `tools/repair-model.py` beyond those every cake gets, such as a recolor. */
+  /** Options for `tools/repair-model.py` beyond those every cake gets, such as a recolor, and `tools/bake-cake.sh`'s `--pose-s` for an animated model. */
   repair?: readonly string[];
 }
 
 /** Order: the owner's favorites, then those that passed with reservations, then new candidates not yet reviewed. */
 export const CAKES: readonly CakeEntry[] = [
-  { id: "ccc3f77d27f94ae5acc77992b90b146b", name: "Leather Sofa", author: "gla_bot", license: "CC BY 4.0" },
-  { id: "ecd6448e6dae4b93b60008913bdf8554", name: "Heritage Potato", author: "Tony.Richards", license: "CC BY 4.0" },
-  { id: "3c889b5ee6b64a2aafb9b8977f8a8219", name: "Turkey Leg", author: "BillieBones", license: "CC BY 4.0" },
-  { id: "79b95e7cf3dc422e814598b0eea6c83f", name: "Knitted Mitten", author: "nebulousflynn", license: "CC BY 4.0" },
-  { id: "89b7408463b144d0bd157cc788dd496d", name: "Yellow Sneaker", author: "mr.pinoux", license: "CC BY 4.0" },
-  { id: "8e0288f099bb418199e8896c19bed05e", name: "Toy Dinosaur", author: "TheCactusFactory", license: "CC BY 4.0", repair: ["--recolor", "103", "0.63", "0.63"] },
-  { id: "0aeba0a56d414a6bb1865cf3375aef6b", name: "Lucky Cat", author: "squishynoize", license: "CC BY 4.0" },
-  { id: "511db88f24e04eb1be8b0c0c080e1e5e", name: "Chicken Nugget", author: "Laserdesign", license: "CC BY 4.0" },
-  { id: "348c77822bff4de3b6df59839b2fd201", name: "Camo Sneaker", author: "matousekfoto", license: "CC BY 4.0", repair: ["--hollow", "0.004", "0.022"] },
-  { id: "d9506d9a318e4c56ac3d8ab273bd2540", name: "Work Boot", author: "inciprocal.com", license: "CC BY 4.0" },
-  { id: "a5923998c60547c7a7887f11f2f2088d", name: "Ginger Root", author: "insomnia333", license: "CC BY 4.0" },
-  { id: "53fdf984962948128db5f4ccfcae0843", name: "Old Pear", author: "inciprocal.com", license: "CC BY 4.0" },
-  { id: "143e23a0436449f686ea0dd947e6f634", name: "Croissant", author: "rozza3d", license: "CC BY 4.0", repair: ["--fill-unlit-underside"] },
-  { id: "a00d2eaa0c1d459f893ae4cbb08b866e", name: "Boxing Glove", author: "urheilumuseo", license: "CC BY 4.0" },
-  { id: "b400281a14bf4f3a87bc6a053a19581a", name: "Garden Scarecrow", author: "edemaistre", license: "CC BY 4.0" },
-  { id: "e4b7d4137f444265ad98fb02780ccc5e", name: "Garden Gnome", author: "tiozombi", license: "CC BY 4.0" },
-  { id: "ec9c0ac738fd4495af334ea2092e8d89", name: "Common Raven", author: "WirtualneMuzeaMalopolski", license: "CC0 1.0" },
-  { id: "c5fad940863f47f784d792ca95e16b42", name: "Tuna Fish", author: "dhjwdwd", license: "CC BY 4.0", repair: ["--turn", "z", "90"] },
-  { id: "daeadd913644438aa3096bb357a02016", name: "Electric Guitar", author: "abazibiz", license: "CC BY 4.0", repair: ["--hull-open-pieces"] },
-  { id: "4ce9e8dbeb74425eb215e4168807dcb5", name: "Grand Piano", author: "richterbelmont26", license: "CC BY 4.0" },
-  { id: "165d500fb0274a8e88a5bdc12df65492", name: "Classic Piano", author: "kozhokar_kate", license: "CC BY 4.0", repair: ["--hull-open-pieces"] },
-  { id: "c65a00ca4a174653beb4c59cb42b9143", name: "Mossy Log", author: "julianmalik", license: "CC BY 4.0" },
-  { id: "fc6e731a0131471ba8e45511c7ea9996", name: "Marble Bust", author: "WirtualneMuzeaMalopolski", license: "CC0 1.0" },
+  { id: "ccc3f77d27f94ae5acc77992b90b146b", name: "Leather Sofa", kind: "Furniture", author: "gla_bot", license: "CC BY 4.0" },
+  { id: "ecd6448e6dae4b93b60008913bdf8554", name: "Heritage Potato", kind: "Food", author: "Tony.Richards", license: "CC BY 4.0" },
+  { id: "3c889b5ee6b64a2aafb9b8977f8a8219", name: "Turkey Leg", kind: "Food", author: "BillieBones", license: "CC BY 4.0" },
+  { id: "79b95e7cf3dc422e814598b0eea6c83f", name: "Knitted Mitten", kind: "Gloves", author: "nebulousflynn", license: "CC BY 4.0" },
+  { id: "89b7408463b144d0bd157cc788dd496d", name: "Yellow Sneaker", kind: "Shoes", author: "mr.pinoux", license: "CC BY 4.0" },
+  { id: "8e0288f099bb418199e8896c19bed05e", name: "Toy Dinosaur", kind: "Figures", author: "TheCactusFactory", license: "CC BY 4.0", repair: ["--recolor", "103", "0.63", "0.63"] },
+  { id: "0aeba0a56d414a6bb1865cf3375aef6b", name: "Lucky Cat", kind: "Figures", author: "squishynoize", license: "CC BY 4.0" },
+  { id: "511db88f24e04eb1be8b0c0c080e1e5e", name: "Chicken Nugget", kind: "Food", author: "Laserdesign", license: "CC BY 4.0" },
+  { id: "348c77822bff4de3b6df59839b2fd201", name: "Camo Sneaker", kind: "Shoes", author: "matousekfoto", license: "CC BY 4.0", repair: ["--hollow", "0.004", "0.022", "--inside-color", "138", "161", "32"] },
+  { id: "d9506d9a318e4c56ac3d8ab273bd2540", name: "Work Boot", kind: "Shoes", author: "inciprocal.com", license: "CC BY 4.0" },
+  { id: "a5923998c60547c7a7887f11f2f2088d", name: "Ginger Root", kind: "Food", author: "insomnia333", license: "CC BY 4.0" },
+  { id: "53fdf984962948128db5f4ccfcae0843", name: "Old Pear", kind: "Food", author: "inciprocal.com", license: "CC BY 4.0" },
+  { id: "143e23a0436449f686ea0dd947e6f634", name: "Croissant", kind: "Food", author: "rozza3d", license: "CC BY 4.0", repair: ["--fill-unlit-underside"] },
+  { id: "a00d2eaa0c1d459f893ae4cbb08b866e", name: "Boxing Glove", kind: "Gloves", author: "urheilumuseo", license: "CC BY 4.0" },
+  { id: "b400281a14bf4f3a87bc6a053a19581a", name: "Garden Scarecrow", kind: "Figures", author: "edemaistre", license: "CC BY 4.0" },
+  { id: "e4b7d4137f444265ad98fb02780ccc5e", name: "Garden Gnome", kind: "Figures", author: "tiozombi", license: "CC BY 4.0" },
+  { id: "ec9c0ac738fd4495af334ea2092e8d89", name: "Common Raven", kind: "Animals", author: "WirtualneMuzeaMalopolski", license: "CC0 1.0" },
+  { id: "c5fad940863f47f784d792ca95e16b42", name: "Tuna Fish", kind: "Animals", author: "dhjwdwd", license: "CC BY 4.0", repair: ["--turn", "z", "90"] },
+  { id: "daeadd913644438aa3096bb357a02016", name: "Electric Guitar", kind: "Instruments", author: "abazibiz", license: "CC BY 4.0", repair: ["--hull-open-pieces"] },
+  { id: "4ce9e8dbeb74425eb215e4168807dcb5", name: "Grand Piano", kind: "Instruments", author: "richterbelmont26", license: "CC BY 4.0" },
+  { id: "165d500fb0274a8e88a5bdc12df65492", name: "Classic Piano", kind: "Instruments", author: "kozhokar_kate", license: "CC BY 4.0", repair: ["--hull-open-pieces"] },
+  { id: "c65a00ca4a174653beb4c59cb42b9143", name: "Mossy Log", kind: "Nature", author: "julianmalik", license: "CC BY 4.0" },
+  { id: "fc6e731a0131471ba8e45511c7ea9996", name: "Marble Bust", kind: "Figures", author: "WirtualneMuzeaMalopolski", license: "CC0 1.0" },
+  { id: "2e9082cfd8c444d9b3b1b20821a0e101", name: "Hybrid Duck", kind: "Animals", author: "darwinmuseum.ru", license: "CC BY-NC 4.0", repair: ["--trim-below", "0.29"] },
+  { id: "9708312028e945988303ab75d578e120", name: "Mallard", kind: "Animals", author: "dinomaster", license: "CC BY 4.0", repair: ["--pose-s", "5", "--trim-below", "0.29"] },
 ];
 
 /** The license deeds a credit links to, by the name it shows. */
 const LICENSE_URLS = {
   "CC BY 4.0": "https://creativecommons.org/licenses/by/4.0/",
+  "CC BY-NC 4.0": "https://creativecommons.org/licenses/by-nc/4.0/",
   "CC0 1.0": "https://creativecommons.org/publicdomain/zero/1.0/",
 } as const;
 type LicenseName = keyof typeof LICENSE_URLS;
@@ -66,7 +75,7 @@ export function buildCreditsList(): HTMLUListElement {
   return list;
 }
 
-function buildLink(text: string, href: string): HTMLAnchorElement {
+export function buildLink(text: string, href: string): HTMLAnchorElement {
   const link = document.createElement("a");
   link.href = href;
   link.target = "_blank";
