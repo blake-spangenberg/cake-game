@@ -9,29 +9,31 @@ The game is intuitive, since it depicts a scenario that could exist in the real 
 ## Access
 - The game runs in a browser tab opened from a link posted in the Zoom chat. No installs, accounts, or controllers.
 - It is not a Zoom App: publishing one for guests outside the host's Zoom account takes Zoom's Marketplace review (4-12 weeks), and guest mode only reaches invited, unauthenticated participants. The web build stays runnable inside Zoom's embedded browser (WebView2) so a Zoom App stays possible later.
-- Players join late and near instantly: a late joiner spectates the round in progress and plays the next one.
+- Players join late and near instantly: a late joiner plays the round in progress with the time left, rather than spectating it (owner, 2026-11-25).
+- A page that needs time to load shows only "Loading..." centered, and nothing else, until it can show the lobby or the round. A fatal error, such as a lost connection, shows the same way, full screen and centered. No other status message ever shows, so no part of the page is reserved for one (owner, 2026-11-25).
 - Nothing carries over between rounds: no leaderboard history, no stored player identity. The one exception is a player's seat: a page that closes or loses its connection can reopen into its own seat, mid-round included, until that player has been inactive for 1 hour. The page remembers a player's name and standup order preference on that browser, and asks for them again, filled in as last set, once the player has gone over 1 hour without mouse or keyboard input on the site.
 
 ## Lobby
 - No one hosts by default. Any player in the lobby can claim host with a button and a password, `greylag`, even from a host still present. When the host leaves or expires, the seat stays vacant until someone claims it.
-- Every player types a name before joining. This is the one place the game requires the keyboard. With the name, the player sets their standup order preference on a slider from "first to give update" to "last to give update", stored as 0.0-1.0. No one else sees the preference before the results.
-- The lobby screen shows no table, cake, or cake stand: just a vertical, single-column list of players, the rules, and for the host a button to pick the cake.
-- The host picks the round's cake from a scrollable view of model previews, not a text list, preset to Random, then presses Start. Previews are ordered by kind of object, with no group titles. Picking Random settles on one cake at once, never rerolled at Start. Every page downloads the picked cake in the lobby without showing it, so the round starts without a load.
-- The rules stay visible so players learn while the lobby fills, and spectators see them too. They are a 4-panel image set of still frames rendered from the game itself, each staged at its step with arrows or a cursor drawn over it for the motion, and captioned with one of these, with "Cut!" stylized:
+- Every player types a name before joining. This is the one place the game requires the keyboard. With the name, a checkbox `I have a scrum update`, checked by default, sits above the slider labeled "Standup order preference", from "first to give update" to "last to give update", stored as 0.0-1.0. Unchecking it grays out the slider, and that player gets no standup slot, though they still play and rank. No one else sees the preference before the results.
+- The lobby screen shows no table, cake, or cake stand: just a vertical, single-column list of players, the rules, and for the host a button to pick the cake. Its columns sit centered and adapt to the window, as do the results lists. Its top middle reads "visit cake.bspang.net to join", the address styled apart from the words.
+- The host picks the round's cake from a scrollable view of model previews, not a text list, preset to Random, then presses Start. Previews are ordered by kind of object, with no group titles. Picking Random settles on one cake at once, never rerolled at Start. Every page downloads the picked cake in the lobby without showing it, so the round starts without a load. Everyone but the host learns which cake was picked only when the round begins.
+- The rules stay visible so players learn while the lobby fills, and spectators see them too. They are a 4-panel image set of still frames rendered from the game itself, each staged at its step with arrows or a cursor drawn over it for the motion, and numbered with stylized numerals, shown a little larger where the window has room, with the camera controls mentioned in or beside them, and captioned with one of these, with "Cut!" stylized:
     - Click and drag the cake onto the cake stand
     - Adjust the rotation of the cake stand and the angle of the knife to line up the perfect cut
     - Press Cut! to lock in, cutting your cake in half
     - The winner is the player whose halves are most similar by weight
-- A credits page, reachable from the lobby only, says the game is inspired by the German game show Schlag den Henssler, lists the license credits for every sourced asset and every open-source library the game ships, and names the author, Blake Spangenberg. It names the main libraries (three.js, Rapier, nalgebra, wasm-bindgen) and links the full list.
-- Each cake has a short in-game name the owner sets (Croissant, Grand Piano), not its source's title. Its credit line names the model's author, linked to the model's page, and its license, linked to the license's terms.
+- A credits page, linked from the bottom left corner of the lobby and of the results screen, says the game is inspired by the German game show Schlag den Henssler, lists the license credits for every sourced asset and every open-source library the game ships, and names the author, Blake Spangenberg. It names the main libraries (three.js, Rapier, nalgebra, wasm-bindgen) and links the full list.
+- Each cake has a short in-game name the owner sets (Croissant, Grand Piano), not its source's title. Its credit line, shown in a round's top corner as "Model by <author>", names the model's author, linked to the model's page, and its license, linked to the license's terms.
 - When the tallying is complete, the screen fills for everyone with two lists, which stay up until the host presses Return to Lobby, bringing everyone back for the next round:
-    - Leaderboard: how each player objectively performed
-    - Standup Order: the order people give their scrum update. Players choose in leaderboard order, best first, each taking the open slot closest to their preference, so last place takes the last slot left. Players sharing a rank choose in random order. A player who left mid-round chooses at their rank like anyone. Spectators get slots too, choosing after every player in the order they joined
+    - Leaderboard: how each player objectively performed, places written 1st, 2nd, 3rd, 4th
+    - Standup Order: the order people give their scrum update, numbered 1. 2. 3. Players choose in leaderboard order, best first, each taking the open slot closest to their preference, so last place takes the last slot left. Players sharing a rank choose in random order. A player who left mid-round chooses at their rank like anyone. Spectators get slots too, choosing after every player in the order they joined. A player without a scrum update gets no slot
+    - The top three places carry gold, silver, and bronze medals beside their names on both lists
 
 ## Fairness
-- All players get the same time, cake, knife, and starting positions. The cut is deterministic given the cake's and knife's poses.
+- All players get the same time, cake, knife, and starting positions, except that a late joiner gets only the time left. The cut is deterministic given the cake's and knife's poses.
 - Each player has 30 seconds to cut. When time runs out, the game presses `Cut!` for the player, and that cut is judged like any other.
-- A round never waits on one player. A player who leaves mid-round is cut at the deadline and judged like anyone else. A player who switches to another tab lets go of the cake and the knife, as if they released the mouse, and their game catches up when they return. A round starts on time, and a page that has not loaded the cake within 10 seconds sits that round out as a spectator.
+- A round never waits on one player. A player who leaves mid-round is cut at the deadline and judged like anyone else. A player who switches to another tab lets go of the cake and the knife, as if they released the mouse, and their game catches up when they return. A round starts on time, and a page still loading the cake keeps trying until the round ends, then plays with the time left once loaded, as a late joiner does, rather than sitting the round out after 10 seconds (owner, 2026-11-25).
 - The countdown is a pie that slowly loses area, shown to spectators too, and it runs to the round's end for a player who has already cut, ticks included. A red numeric timer appears only in the last 10 seconds, ticking audibly on each update. A whistle blows at 0 seconds or when the last player cuts.
 - Controls and measurement are precise enough that there are no ties. Only identical cuts tie, and the earlier cut wins. Players who never touched the controls share their rank.
 
@@ -65,8 +67,9 @@ The game is intuitive, since it depicts a scenario that could exist in the real 
 The reveal is dramatic, with pomp and circumstance, and is worth a round running past a minute.
 - The knife cuts at once, but the halves stay together until the reveal parts them.
 - Once play ends, every player sees the same view for the rest of the round. The opponent views give way to a leaderboard that starts empty.
-- Players are judged one at a time in random order. The camera cuts to each player's stand, labels their name at the top middle of the view, and orbits slowly clockwise throughout judging.
-- Each scene opens with the knife plunged and the halves still together. The halves slowly slide apart in place, and a gram counter over each half counts up from 0 as they part. Both counters climb at the same rate, so a perfect cut stops both at the same instant and a bad cut keeps counting the larger half alone. The count starts fast and slows the closer it gets to half the cake's weight, so the last few grams tick slowly.
+- Players are judged one at a time in random order. The camera cuts to each player's stand, labels their name at the top middle of the view, and orbits slowly clockwise throughout judging, carrying on from one player's scene to the next rather than restarting.
+- Each scene opens with the knife plunged and the halves still together. The halves slowly slide apart in place, only sideways across the table and never up or down, and a gram counter over each half counts up from 0 as they part. Both counters climb at the same rate, so a perfect cut stops both at the same instant and a bad cut keeps counting the larger half alone. The count starts fast and slows the closer it gets to half the cake's weight along one smooth non-linear ramp, so the last few grams tick slowly without a pause before them.
+- A knife that misses the cake entirely skips the tally: the score reads `Miss` in red wherever 0.0% would appear.
 - Once the counting ends, the percentage score is revealed and the player joins the leaderboard at their rank. The first player judged takes 1st place until dethroned.
 - Scores show as a percentage to the nearest 0.1%. The unrounded score breaks ties.
 - Weight is volume: every material has the same density, so grams are volume times a constant and a cut can be judged by eye.
@@ -93,8 +96,8 @@ The reveal is dramatic, with pomp and circumstance, and is worth a round running
 - The knife's metal is shiny and the table shows wood grain. The knife looks like a classic mezzaluna: a broad curved steel blade with two upright, pear-shaped light wooden knobs on steel ferrules at its ends.
 - After the cut, the knife stays standing in the parted halves. The halves part far enough to tell apart at a glance, and each weight is plainly tied to its own half.
 - Titles and `Cut!` are set in a hand-lettered bakery-sign script, and smaller text in a rounded sans, both bundled with the game rather than loaded from a font service.
-- A chop sound plays for the player's own cut and for opponents' cuts.
-- A page reloaded mid-round stays silent until the player's next click or key, as browsers require, with no prompt asking for one.
+- A chop sound plays for the player's own cut and for opponents' cuts. The chop and the whistle are the owner's own recordings (`assets/sounds/`), shipped compressed, with no credit line.
+- Sound keeps playing while the tab is in the background. A page reloaded mid-round stays silent until the player's next click or key, as browsers require, with no prompt asking for one. Where a browser blocks background sound, a note near the top of the page asks for a click to hear sound instead (owner, 2026-11-25).
 
 ## Stretch goals
 - Realistic cake layer texture on the cut faces

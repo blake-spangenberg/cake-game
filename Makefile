@@ -1,4 +1,4 @@
-.PHONY: install upgrade run serve test format clean wasm cakes previews
+.PHONY: install upgrade run serve stop validate-deploy-env test format clean wasm cakes previews
 .DEFAULT_GOAL := run
 
 ifeq ($(OS),Windows_NT)
@@ -16,8 +16,12 @@ ifeq ($(OS),Windows_NT)
         endif
     endif
     SHELL := $(BASH)
+    KERNEL := Windows_NT
 else
     SHELL := bash
+    KERNEL := $(shell uname -s)
+    # rustup and uv install here by default, which an ssh command, cron, or a service leaves off PATH.
+    export PATH := $(HOME)/.cargo/bin:$(HOME)/.local/bin:$(PATH)
 endif
 .SHELLFLAGS := -euo pipefail -c
 
@@ -53,11 +57,29 @@ run: wasm cakes
 	cd src/client && npm run dev
 
 # Where the multiplayer server listens: plain HTTP, behind a reverse proxy that terminates HTTPS.
+# On Linux it comes from deploy.env (gitignored, see deploy.env.example), without which serve refuses.
+-include deploy.env
 SERVE_LISTEN ?= 127.0.0.1:8080
+SERVICE := bash tools/service.sh
 
-serve: wasm cakes
+ifeq ($(KERNEL),Linux)
+# Builds and (re)starts the server as a systemd --user service, so it outlives the shell and reboots.
+serve: validate-deploy-env install wasm cakes
+	cd src/client && npx vite build
+	cargo build --release -p cake-server
+	$(SERVICE) start --exe $(CARGO_TARGET_DIR)/release/cake-server --listen $(SERVE_LISTEN) --client-dir $(abspath $(BUILD_DIR))/client
+else
+# Builds and runs the server in the foreground, the local loop; only Linux runs it as a service.
+serve: install wasm cakes
 	cd src/client && npx vite build
 	cargo run --release -p cake-server -- --listen $(SERVE_LISTEN) --client-dir $(BUILD_DIR)/client
+endif
+
+stop:
+	$(SERVICE) stop
+
+validate-deploy-env:
+	@test -f deploy.env || { echo "make serve: deploy.env not found; copy deploy.env.example to deploy.env (doc/maintainer/tech-stack.md, Deploy)" >&2; exit 1; }
 
 # Cakes the determinism test replays beside the placeholder: the Marble Bust and Work Boot, whose
 # native and WASM worlds once parted on platform math in their mass properties.

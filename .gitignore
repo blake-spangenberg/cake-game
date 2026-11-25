@@ -1,2 +1,4 @@
 __pycache__/
 .vite/
+# Host-local production settings (deploy.env.example).
+deploy.env
