@@ -38,7 +38,8 @@ upgrade_toolchain() {
 
 upgrade_crates() {
     cargo install cargo-edit --locked --root build/cargo
-    PATH="$TOP_DIR/build/cargo/bin:$PATH" cargo upgrade --incompatible allow --pinned allow
+    # Run by path: a Windows TOP_DIR's drive colon splits a PATH entry, hiding the subcommand from cargo.
+    build/cargo/bin/cargo-upgrade upgrade --incompatible allow --pinned allow
     cargo update
 }
 

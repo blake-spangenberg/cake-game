@@ -1,5 +1,5 @@
-# Zoom Cake Game
-A browser game for a Zoom room: each player grabs and places a 3D cake, aims a knife, and cuts, and the cut closest to two equal halves by weight wins.
+# Cake Game - Scrum Edition
+3D multiplayer browser game inspired by German game show *Schlag den Henssler*. Each player grabs and places a 3D cake, aims a knife, and cuts, and the cut closest to two equal halves by weight wins.
 
 On Windows, run `tools/install-bash.ps1` once in PowerShell to get Git bash and GNU make. Then:
 ```sh
@@ -10,5 +10,3 @@ make stop      # stop the Linux service
 make test      # format check, lints, tests, and the native-vs-WASM determinism check
 make upgrade   # bump the toolchain and every dependency to its latest release, past semver, then make test
 ```
-
-The stack and the determinism rules the simulation must follow are in `doc/maintainer/tech-stack.md`.
