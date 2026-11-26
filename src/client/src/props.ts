@@ -5,7 +5,10 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { type Game, type Layout, get_blade_outline, get_handle_centers, get_stand_parts } from "@wasm/cake_wasm.js";
-import { type WoodLook, buildWoodTexture, setWoodUvs } from "./wood";
+import studioUrl from "./studio.bin?url";
+import { STUDIO_CUBE_PX, decodeStudioLevels } from "./studioFormat";
+import { buildWoodTexture, setWoodUvs } from "./wood";
+import { type WoodKnot, type WoodLook, paintWood } from "./woodPaint";
 
 /** The color of a cake with no texture of its own. */
 export const FROSTING = 0xf3e3ec;
@@ -16,6 +19,7 @@ const KNIFE_EDGE = new THREE.Vector3(0, 0, 1);
 
 /** Polished stainless steel: a near-white base color, since a metal's color is its reflectance. */
 const STEEL = 0xe4e7ea;
+/** At least 0.106, since the baked studio's mirror-sharp level, which only a smoother finish samples, is a stand-in (`studioFormat.ts`). */
 const STEEL_ROUGHNESS = 0.14;
 const STEEL_ENV_INTENSITY = 1.4;
 /** How far the blade's back dips at its middle below its ends, where the handles stand, as in the reference's gentle crescent. */
@@ -64,28 +68,6 @@ const KNOB_WOOD: WoodLook = {
   boardToneSpread: 0,
   seed: 7,
 };
-const STUDIO_WIDTH_PX = 512;
-const STUDIO_BLUR_PX = 6;
-/**
- * Top to bottom: a dim ceiling, gray walls brightening toward the horizon, then a gray floor
- * darkening below, only faintly warm so the steel stays steel-colored over the brown table.
- */
-const STUDIO_GRADIENT: readonly (readonly [number, string])[] = [
-  [0, "#666564"],
-  [0.35, "#8a8783"],
-  [0.49, "#b4b0aa"],
-  [0.51, "#7c7671"],
-  [0.7, "#55504c"],
-  [1, "#2a2826"],
-];
-/** Softboxes in the directions of `addLights`' key and fill lights. */
-const STUDIO_LIGHTS = [
-  { direction: new THREE.Vector3(1.7, 1.2, 0.6), widthShare: 0.14, heightShare: 0.16, color: "#fff6ea" },
-  { direction: new THREE.Vector3(-1.2, 0.9, -0.9), widthShare: 0.1, heightShare: 0.12, color: "#c9d6ff" },
-];
-const STUDIO_STRIP_COLOR = "#d8d6d2";
-const STUDIO_STRIP_TOP_SHARE = 0.16;
-const STUDIO_STRIP_HEIGHT_SHARE = 0.05;
 
 const TABLE_THICKNESS_M = 0.04;
 const LEG_SIDE_M = 0.06;
@@ -98,6 +80,15 @@ const LEG_CORNERS = [
   [-1, -1],
 ] as const;
 const TABLE_ROUGHNESS = 0.6;
+/**
+ * Knots in three of the five boards, clear of the stand and of the middle board, whose
+ * texture row the legs' faces also show.
+ */
+const TABLE_KNOTS: readonly WoodKnot[] = [
+  { u: 0.27, v: 0.7, coreLengthM: 0.026, reachM: 0.07 },
+  { u: 0.72, v: 0.3, coreLengthM: 0.02, reachM: 0.055 },
+  { u: 0.45, v: 0.9, coreLengthM: 0.03, reachM: 0.065 },
+];
 /** Walnut-toned boards. Its size is the table top's, set by `buildTable`. */
 const TABLE_WOOD: Omit<WoodLook, "lengthM" | "breadthM"> = {
   widthPx: 2048,
@@ -109,6 +100,7 @@ const TABLE_WOOD: Omit<WoodLook, "lengthM" | "breadthM"> = {
   latewood: 0x633e26,
   boardToneSpread: 0.1,
   seed: 11,
+  knots: TABLE_KNOTS,
 };
 
 /**
@@ -174,19 +166,20 @@ export function buildStand(layout: Layout): THREE.Group {
 /**
  * A mezzaluna after `.agent/doc/knife-reference.jpg`: a broad polished steel blade whose edge is
  * the core's arc exactly, ground to a bevel along it, under a gently curved back, and at each end
- * a steel ferrule topped by a pear-shaped beech knob. Its matrix is set by `placeKnife`.
+ * a steel ferrule topped by a pear-shaped beech knob, the steel reflecting `studio` from
+ * `fetchPropAssets`. Its matrix is set by `placeKnife`.
  */
-export function buildKnife(layout: Layout): THREE.Group {
+export function buildKnife(layout: Layout, studio: THREE.Texture): THREE.Group {
   const knife = new THREE.Group();
   knife.matrixAutoUpdate = false;
   const steel = new THREE.MeshStandardMaterial({
     color: STEEL,
     metalness: 1,
     roughness: STEEL_ROUGHNESS,
-    envMap: buildStudioEnvironment(),
+    envMap: studio,
     envMapIntensity: STEEL_ENV_INTENSITY,
   });
-  const knobWood = new THREE.MeshStandardMaterial({ map: buildWoodTexture(KNOB_WOOD, 1), roughness: KNOB_ROUGHNESS });
+  const knobWood = new THREE.MeshStandardMaterial({ map: buildWoodTexture(paintWood(KNOB_WOOD), KNOB_WOOD, 1), roughness: KNOB_ROUGHNESS });
   const steelParts = [buildBladeGeometry(layout)];
   const knobs: THREE.BufferGeometry[] = [];
   const centers = get_handle_centers();
@@ -276,48 +269,71 @@ function buildKnobGeometry(lenM: number): THREE.LatheGeometry {
   return knob;
 }
 
+/** What the table and knife need that takes long to make, made off the page's thread by `fetchPropAssets`. */
+export interface PropAssets {
+  /** The table's wood, for `buildTable`. */
+  tableWood: Uint8Array;
+  /** The knife steel's reflections, for `buildKnife`, which every renderer drawing a knife may share. */
+  studio: THREE.Texture;
+}
+
+export async function fetchPropAssets(layout: Layout): Promise<PropAssets> {
+  const [tableWood, studio] = await Promise.all([paintTableWood(layout), fetchStudioEnvironment()]);
+  return { tableWood, studio };
+}
+
 /**
- * A small photo studio as an equirectangular image for the steel to reflect: a softbox where the
- * key light shines from, a cooler one at the fill, a bright strip overhead, gray walls, and the
- * table's brown below the horizon. Each renderer turns it into its own prefiltered map on first use.
+ * The small photo studio the knife's steel reflects (`studio.ts`), already prefiltered, as every
+ * renderer would otherwise prefilter it on first use, holding the page 0.2-0.3 s on a first visit.
  */
-function buildStudioEnvironment(): THREE.Texture {
-  const canvas = document.createElement("canvas");
-  canvas.width = STUDIO_WIDTH_PX;
-  canvas.height = STUDIO_WIDTH_PX / 2;
-  const ctx = canvas.getContext("2d")!;
-  const { width, height } = canvas;
-  const sky = ctx.createLinearGradient(0, 0, 0, height);
-  for (const [stop, color] of STUDIO_GRADIENT) sky.addColorStop(stop, color);
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, width, height);
-  ctx.filter = `blur(${STUDIO_BLUR_PX}px)`;
-  for (const light of STUDIO_LIGHTS) {
-    const [x, y] = calcEquirectPx(light.direction, width, height);
-    ctx.fillStyle = light.color;
-    ctx.fillRect(x - (light.widthShare * width) / 2, y - (light.heightShare * height) / 2, light.widthShare * width, light.heightShare * height);
-  }
-  ctx.fillStyle = STUDIO_STRIP_COLOR;
-  ctx.fillRect(0, height * STUDIO_STRIP_TOP_SHARE, width, height * STUDIO_STRIP_HEIGHT_SHARE);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.mapping = THREE.EquirectangularReflectionMapping;
+async function fetchStudioEnvironment(): Promise<THREE.CompressedCubeTexture> {
+  const response = await fetch(studioUrl);
+  if (!response.ok) throw new Error(`fetching ${studioUrl}: HTTP ${response.status}`);
+  const levels = decodeStudioLevels(new Uint8Array(await response.arrayBuffer()));
+  // three uploads a compressed cube's levels from each face's `mipmaps`, as plain RGBA texels in its default format.
+  const faces = Array.from({ length: levels[0].length }, (_, face) => ({
+    width: STUDIO_CUBE_PX,
+    height: STUDIO_CUBE_PX,
+    mipmaps: levels.map((level, idx) => ({ data: level[face], width: STUDIO_CUBE_PX >> idx, height: STUDIO_CUBE_PX >> idx })),
+  }));
+  const texture = new THREE.CompressedCubeTexture(faces);
   texture.colorSpace = THREE.SRGBColorSpace;
+  // Sampled as the prefiltered cube it is, rather than prefiltered again.
+  texture.isPMREMTexture = true;
+  texture.needsUpdate = true;
   return texture;
 }
 
-/** Where `direction` lands in an equirectangular image, as three samples one. */
-function calcEquirectPx(direction: THREE.Vector3, width: number, height: number): [number, number] {
-  const unit = direction.clone().normalize();
-  const u = Math.atan2(unit.z, unit.x) / (2 * Math.PI) + 0.5;
-  const v = Math.asin(unit.y) / Math.PI + 0.5;
-  return [u * width, (1 - v) * height];
+/**
+ * The texels of the table's wood, painted in a worker, since painting took 70-190 ms on the page's
+ * thread, or on that thread where the worker fails.
+ */
+function paintTableWood(layout: Layout): Promise<Uint8Array> {
+  const look = calcTableLook(layout);
+  return new Promise((resolve) => {
+    const worker = new Worker(new URL("./woodWorker.ts", import.meta.url), { type: "module" });
+    worker.addEventListener("message", (event: MessageEvent<Uint8Array>) => {
+      worker.terminate();
+      resolve(event.data);
+    });
+    worker.addEventListener("error", (event) => {
+      worker.terminate();
+      console.error(`painting the table's wood in a worker failed, painting it on the page's thread: ${event.message}`);
+      resolve(paintWood(look));
+    });
+    worker.postMessage(look);
+  });
 }
 
-/** The table top and legs in glued-up boards of wood, its grain whole across the top with no repeat. */
-export function buildTable(layout: Layout, anisotropy: number): THREE.Group {
+function calcTableLook(layout: Layout): WoodLook {
+  return { ...TABLE_WOOD, lengthM: 2 * layout.table_half_x_m, breadthM: 2 * layout.table_half_z_m };
+}
+
+/** The table top and legs in glued-up boards of `woodTexels` from `fetchPropAssets`, its grain whole across the top with no repeat. */
+export function buildTable(layout: Layout, woodTexels: Uint8Array, anisotropy: number): THREE.Group {
   const { table_half_x_m: halfX, table_half_z_m: halfZ } = layout;
-  const look = { ...TABLE_WOOD, lengthM: 2 * halfX, breadthM: 2 * halfZ };
-  const wood = new THREE.MeshStandardMaterial({ map: buildWoodTexture(look, anisotropy), roughness: TABLE_ROUGHNESS });
+  const look = calcTableLook(layout);
+  const wood = new THREE.MeshStandardMaterial({ map: buildWoodTexture(woodTexels, look, anisotropy), roughness: TABLE_ROUGHNESS });
   const table = new THREE.Group();
   const topGeometry = new THREE.BoxGeometry(2 * halfX, TABLE_THICKNESS_M, 2 * halfZ).translate(0, -TABLE_THICKNESS_M / 2, 0);
   setWoodUvs(topGeometry, look, 0);

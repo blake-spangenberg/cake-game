@@ -2,7 +2,7 @@
 .rules {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 10px;
+  gap: 1.3em var(--rules-column-gap, 16px);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -19,10 +19,24 @@
   border-radius: 6px;
 }
 
+/* The step's numeral in the bakery script, hanging left of its caption like a sign's. */
 .rules figcaption {
-  margin-top: 6px;
+  display: flex;
+  gap: 0.45em;
+  align-items: flex-start;
+  margin-top: 0.7em;
   font-size: 0.9em;
   line-height: 1.35;
+}
+
+.rules-numeral {
+  flex: none;
+  min-width: 0.7em;
+  color: #e0b04a;
+  font-family: "Pacifico", cursive;
+  font-size: 1.9em;
+  line-height: 1;
+  text-align: center;
 }
 
 /* A small copy of the Cut! button: the bakery script in white on its red. */
@@ -35,4 +49,28 @@
   font-size: 1.05em;
   line-height: 1;
   white-space: nowrap;
+}
+
+/* The camera's controls under the panels, one per line with their left edges aligned, each what it does and pictures of its inputs. */
+.camera-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  align-items: flex-start;
+  width: fit-content;
+  margin: 1.1em auto 0;
+  font-size: 0.85em;
+  opacity: 0.85;
+}
+
+.camera-control {
+  display: flex;
+  gap: 0.45em;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.camera-control svg {
+  height: 2.2em;
+  width: auto;
 }

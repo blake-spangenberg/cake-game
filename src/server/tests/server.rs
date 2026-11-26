@@ -16,8 +16,8 @@ use cake_core::replay::{build_placement_inputs, build_scripted_inputs};
 use cake_core::sim::World;
 use cake_server::catalog::Catalog;
 use cake_server::protocol::{
-    ClientMessage, POSE_FLAG_CUT, POSE_FLAG_HOLDING, POSE_RECORD_SIZE, PhaseName, PlayerId, ServerMessage, Standing,
-    encode_input_frame,
+    ClientMessage, Member, POSE_FLAG_CUT, POSE_FLAG_HOLDING, POSE_RECORD_SIZE, PhaseName, PlayerId, ServerMessage,
+    Standing, encode_input_frame,
 };
 use cake_server::room::{HOST_PASSWORD, Room, RoomConfig};
 use cake_server::{
@@ -90,7 +90,9 @@ async fn start_server() -> String {
         max_lead_ticks: 2 * ROUND_TICKS,
         deadline_grace_ms: BURST_GRACE_MS,
         judging_delay_ms: 0,
-        judging_scene_ms: 0,
+        judging_hold_ms: 0,
+        judging_max_count_ms: 0,
+        judging_after_ms: 0,
         judging_tail_ms: 0,
         ..RoomConfig::default()
     };
@@ -111,7 +113,14 @@ async fn connect_preferring(address: &str, name: &str, standup_preference: f64) 
 
 async fn connect_seated(address: &str, name: &str, standup_preference: f64, seat: Option<String>) -> Socket {
     let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws")).await.unwrap();
-    send(&mut socket, &ClientMessage::Join { name: name.to_string(), standup_preference, seat }).await;
+    let join = ClientMessage::Join {
+        name: name.to_string(),
+        standup_preference,
+        has_scrum_update: true,
+        seat,
+        is_debug: false,
+    };
+    send(&mut socket, &join).await;
     socket
 }
 
@@ -328,6 +337,78 @@ async fn a_page_reopened_with_its_seat_token_plays_as_its_old_id() {
     assert_eq!(wait_welcome(&mut reopened).await, (alice_id, seat));
 }
 
+/// What a socket receives next, skipping pings, within the wait: a message, or none once it closes.
+async fn wait_next_message(socket: &mut Socket) -> Option<Message> {
+    let wait = async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                Some(Ok(Message::Close(_)) | Err(_)) | None => return None,
+                Some(Ok(message)) => return Some(message),
+            }
+        }
+    };
+    tokio::time::timeout(MESSAGE_TIMEOUT, wait).await.expect("a message or the close arrives")
+}
+
+#[tokio::test]
+async fn a_join_with_the_name_of_a_connected_player_is_told_the_name_is_taken_and_closed() {
+    let address = start_server().await;
+    let mut alice = connect(&address, "Alice").await;
+    wait_welcome(&mut alice).await;
+    let mut second = connect(&address, " alice ").await;
+    let refusal = wait_next_message(&mut second).await.expect("a refusal before the close");
+    let Message::Text(text) = refusal else {
+        panic!("expected a text refusal, got {refusal:?}");
+    };
+    assert_eq!(serde_json::from_str::<ServerMessage>(text.as_str()).unwrap(), ServerMessage::NameTaken);
+    assert_eq!(wait_next_message(&mut second).await, None);
+}
+
+#[tokio::test]
+async fn a_page_rejoining_with_its_seat_token_while_its_old_connection_is_open_takes_the_seat_and_closes_the_old_one() {
+    let address = start_server().await;
+    let mut old = connect(&address, "Alice").await;
+    let (alice_id, seat) = wait_welcome(&mut old).await;
+    let mut reloaded = connect_seated(&address, "Alice", 0.5, Some(seat.clone())).await;
+    assert_eq!(wait_welcome(&mut reloaded).await, (alice_id, seat));
+    let members = wait_for(&mut reloaded, |message| match message {
+        ServerMessage::Room { members, .. } => Some(members),
+        _ => None,
+    })
+    .await;
+    assert_eq!(members, [Member { id: alice_id, name: "Alice".to_string() }]);
+    // The old connection gets what was sent before the reload, then closes.
+    while wait_next_message(&mut old).await.is_some() {}
+}
+
+#[test]
+fn a_join_that_leaves_out_the_scrum_update_and_debug_has_an_update_and_is_no_debug_page() {
+    let join: ClientMessage =
+        serde_json::from_str(r#"{"type":"join","name":"Bot 1","standup_preference":0.5}"#).unwrap();
+    let expected = ClientMessage::Join {
+        name: "Bot 1".to_string(),
+        standup_preference: 0.5,
+        has_scrum_update: true,
+        seat: None,
+        is_debug: false,
+    };
+    assert_eq!(join, expected);
+}
+
+#[test]
+fn the_largest_join_a_debug_page_sends_fits_the_message_size_limit() {
+    let join = ClientMessage::Join {
+        name: "\u{1F370}".repeat(MAX_NAME_LEN),
+        standup_preference: 0.123_456_789_012_345_67,
+        has_scrum_update: false,
+        seat: Some("0123456789abcdef0123456789abcdef".to_string()),
+        is_debug: true,
+    };
+    let size = serde_json::to_string(&join).unwrap().len();
+    assert!(size <= MAX_MESSAGE_SIZE, "a join of {size} bytes");
+}
+
 #[tokio::test]
 async fn results_carry_the_standup_order_and_the_host_returns_everyone_to_the_lobby() {
     let address = start_server().await;
@@ -362,7 +443,14 @@ async fn malformed_messages_are_ignored_and_a_wrong_hash_is_reported() {
 
     alice.send(Message::text("{\"type\":\"shout\"}")).await.unwrap();
     alice.send(Message::binary(vec![1, 2, 3])).await.unwrap();
-    send(&mut alice, &ClientMessage::Join { name: "Alice".to_string(), standup_preference: 0.5, seat: None }).await;
+    let join = ClientMessage::Join {
+        name: "Alice".to_string(),
+        standup_preference: 0.5,
+        has_scrum_update: true,
+        seat: None,
+        is_debug: false,
+    };
+    send(&mut alice, &join).await;
     send(&mut alice, &ClientMessage::Hash { tick: 0, hash: "not a number".to_string() }).await;
     let inputs = &build_placement_inputs()[..60];
     send_inputs(&mut alice, inputs).await;

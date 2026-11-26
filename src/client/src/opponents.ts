@@ -149,6 +149,7 @@ export class Opponents {
   constructor(
     private readonly layout: Layout,
     ticksPerS: number,
+    studio: THREE.Texture,
   ) {
     this.tickMs = 1000 / ticksPerS;
     const canvas = this.panel.querySelector<HTMLCanvasElement>("canvas")!;
@@ -158,16 +159,14 @@ export class Opponents {
     addLights(this.scene, SHADOW);
     this.scene.background = new THREE.Color(TILE_COLOR);
     this.stand = buildStand(layout);
-    this.knife = buildKnife(layout);
+    this.knife = buildKnife(layout, studio);
     this.scene.add(this.stand, this.knife);
     this.frame = calcFrame(layout, layout.stand_radius_m, 0);
   }
 
   /**
-   * Compiles the stand's and knife's shaders and prefilters the steel's reflections, once, so the
-   * first round's first frame, which ran 90 ms long compiling them, compiles nothing. It holds the
-   * page while three prefilters the reflections, 0.2-0.25 s on a browser's first visit, so the
-   * page calls it once the player has joined rather than while they type their name.
+   * Compiles the stand's and knife's shaders, once, so the first round's first frame, which ran
+   * 90 ms long compiling them, compiles nothing.
    */
   ensureWarm(): Promise<void> {
     this.warmingUp ??= this.warmUp();
@@ -189,11 +188,18 @@ export class Opponents {
   open(players: readonly Member[]): void {
     this.close();
     this.isOpen = true;
-    this.opponents = players.map((player) => this.addOpponent(player));
+    this.opponents = players.map((player) => this.buildOpponent(player));
     this.panel.hidden = false;
   }
 
-  /** Drops the tiles of `ids`, players who left the round before it started to spectate it instead. */
+  /** Shows a tile for `player`, who began playing the open round after it started, unless one shows already. */
+  addOpponent(player: Member): void {
+    if (!this.isOpen || this.opponents.some((opponent) => opponent.id === player.id)) return;
+    this.opponents.push(this.buildOpponent(player));
+    this.layoutKey = "";
+  }
+
+  /** Drops the tiles of `ids`, round players whose page has yet to load the cake, until they play. */
   removeOpponents(ids: readonly number[]): void {
     for (const opponent of this.opponents) if (ids.includes(opponent.id)) opponent.tag.remove();
     this.opponents = this.opponents.filter((opponent) => !ids.includes(opponent.id));
@@ -270,7 +276,9 @@ export class Opponents {
     const values = Float32Array.from([...pose.cake, ...pose.knife, pose.stand_rad]);
     opponent.history = [...opponent.history.filter((record) => record.tick < tick), { tick, values }];
     // A cut from before this page saw the opponent move, as a late joiner gets, shows as finished.
-    const startMs = opponent.playTick === null ? -Infinity : null;
+    // So does one in a hidden tab, which draws no frames and chops now instead, as the cut comes.
+    if (document.hidden) playChop("opponent");
+    const startMs = opponent.playTick === null || document.hidden ? -Infinity : null;
     opponent.cut = { tick, fromLowerM: pose.knife[1], toLowerM: cutLowerM, startMs };
   }
 
@@ -291,6 +299,19 @@ export class Opponents {
     const hasLeft = this.names.size > 0 && name === undefined;
     opponent.name.textContent = hasLeft ? `${opponent.playerName} ${LEFT_MARK}`.trim() : opponent.playerName;
     opponent.name.classList.toggle("is-left", hasLeft);
+  }
+
+  /**
+   * What each tile shows, for a `?debug` page's checks: the tick it plays, none before its first
+   * pose, its pose there in `PlayerPose.values`' layout, and whether it plays or has played the cut.
+   */
+  readTiles(): { id: number; playTick: number | null; values: number[]; isCutShown: boolean; isFrozen: boolean }[] {
+    return this.opponents.map((opponent) => {
+      const values = new Float32Array(POSE_LEN);
+      if (opponent.playTick !== null) interpolate(opponent.history, opponent.playTick, values);
+      const isCutShown = opponent.cut !== null && opponent.cut.startMs !== null;
+      return { id: opponent.id, playTick: opponent.playTick, values: [...values], isCutShown, isFrozen: opponent.snapshot !== null };
+    });
   }
 
   /** Draws every tile at `nowMs`, from the newest poses the server sent. */
@@ -321,7 +342,7 @@ export class Opponents {
     }
   }
 
-  private addOpponent({ id, name: playerName }: Member): Opponent {
+  private buildOpponent({ id, name: playerName }: Member): Opponent {
     const tag = document.createElement("div");
     tag.className = "opponent-tag";
     const name = Object.assign(document.createElement("span"), { className: "opponent-name" });

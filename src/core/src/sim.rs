@@ -1,6 +1,7 @@
 mod hand;
 mod mass;
 mod setup;
+mod squash;
 
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use crate::cakes::CakeModel;
 use crate::cut::{Split, calc_split};
 use crate::input::{Input, KnifeInput, calc_radians};
 use crate::knife::{BLADE_BACK_M, Knife, PosedTree, Solid, Turn, calc_rest_m, calc_sweep_reach};
-use crate::table::{CAKE_SPAWN, RESPAWN_BELOW_Y_M};
+use crate::table::{CAKE_SPAWN, RESPAWN_BELOW_Y_M, STAND_RADIUS_M, TABLE_HALF_X_M, TABLE_HALF_Z_M};
 use hand::Grip;
 pub use setup::Cake;
 use setup::{StandPlate, insert_cake, insert_knife, insert_stand, insert_table, insert_under_plate_fill};
@@ -45,6 +46,9 @@ const ROLL_RESISTANCE_RAD_PER_S2: f32 = 80.0;
 /// quarter is never compared, since it holds the jolt of landing.
 const STILL_DRIFT_M: f64 = 0.005;
 const STILL_QUARTER_TICKS: u32 = TICKS_PER_S / 4;
+/// A free cake slower than this, spinning no faster than the rolling resistance stops in a tick,
+/// has stopped moving but for its creep, and rests if its squash holds it.
+const SQUASH_HOLD_SPEED_M_PER_S: f32 = 0.05;
 /// How far a free cake rising into the pressed edge may raise the knife in one tick. A cake that
 /// would raise it further moved into the blade from the side, and the blade stops it instead.
 const MAX_CAKE_PUSH_M: f64 = 0.005;
@@ -157,9 +161,10 @@ impl World {
             return;
         }
         self.step_hand(input.hand);
-        self.step_stand(input.stand_angle);
+        let is_carried = self.step_stand(input.stand_angle);
         self.step_knife(input.knife);
         self.resist_rolling();
+        self.update_squash_hold(is_carried);
         let before_step = *self.physics.bodies[self.cake].position();
         self.physics.step();
         self.update_cake_positions();
@@ -258,6 +263,7 @@ impl World {
         for value in cake.linvel().to_array().into_iter().chain(cake.angvel().to_array()) {
             hash.write(&value.to_bits().to_le_bytes());
         }
+        hash.write(&cake.gravity_scale().to_bits().to_le_bytes());
         for value in hand.translation().to_array() {
             hash.write(&value.to_bits().to_le_bytes());
         }
@@ -288,6 +294,29 @@ impl World {
         cake.set_angvel(spin * (slowed_len / spin_len), false);
     }
 
+    /// Puts a free cake its squash holds to sleep with gravity off, and gives a cake it no longer
+    /// holds its gravity back. Gravity stays off because the stand's carry wakes the cake in the
+    /// step, and gravity would then rock it off a pose only the squash holds. A sleeping cake the
+    /// stand did not carry cannot have moved, and a held cake still slow moved only by the stand's
+    /// turn about the vertical, which leaves its squash as it was, so both keep their hold unchecked.
+    #[expect(clippy::float_cmp, reason = "the scale is only ever set to exactly 0 or 1")]
+    fn update_squash_hold(&mut self, is_carried: bool) {
+        let cake = &self.physics.bodies[self.cake];
+        if cake.is_sleeping() && !is_carried {
+            return;
+        }
+        let was_held = cake.gravity_scale() == 0.0;
+        let is_held = self.grip.is_none() && (was_held && self.is_cake_slow() || self.is_held_by_squash());
+        let cake = &mut self.physics.bodies[self.cake];
+        let gravity_scale = if is_held { 0.0 } else { 1.0 };
+        if cake.gravity_scale() != gravity_scale {
+            cake.set_gravity_scale(gravity_scale, false);
+        }
+        if is_held {
+            cake.sleep();
+        }
+    }
+
     /// Puts the free cake to sleep once it has stayed in place and stopped speeding up, as
     /// [`STILL_DRIFT_M`] describes, though it may still rock or creep there too slightly to leave it.
     fn ensure_still_cake_sleeps(&mut self) {
@@ -312,6 +341,33 @@ impl World {
         self.still_marks = [later, pose];
     }
 
+    /// Whether the slow cake rests on the plate or the table with its center of mass over the
+    /// patch it squashes onto there, as the `squash` module describes.
+    fn is_held_by_squash(&self) -> bool {
+        if !self.is_cake_slow() || !self.is_cake_supported() {
+            return false;
+        }
+        let cake = &self.physics.bodies[self.cake];
+        let pose = cake.position();
+        let com = pose.transform_point(cake.mass_properties().local_mprops.local_com).as_dvec3();
+        let (rotation, translation) = (pose.rotation.as_dquat(), pose.translation.as_dvec3());
+        let is_on_stand = self.is_on_stand();
+        self.shared.hull_frame.is_over_squashed_patch(rotation, translation, com, |p| {
+            if is_on_stand {
+                return p.length() <= STAND_RADIUS_M;
+            }
+            p.x.abs() <= TABLE_HALF_X_M && p.y.abs() <= TABLE_HALF_Z_M
+        })
+    }
+
+    /// Whether the cake spins no faster than the rolling resistance stops in a tick and moves slower
+    /// than [`SQUASH_HOLD_SPEED_M_PER_S`].
+    fn is_cake_slow(&self) -> bool {
+        let cake = &self.physics.bodies[self.cake];
+        cake.angvel().length() <= ROLL_RESISTANCE_RAD_PER_S2 * RAPIER_DT_S
+            && cake.linvel().length() <= SQUASH_HOLD_SPEED_M_PER_S
+    }
+
     /// At most how far any point of the cake moves from pose `a` to `b`.
     fn calc_drift_m(&self, a: Pose, b: Pose) -> f64 {
         let com = self.physics.bodies[self.cake].mass_properties().local_mprops.local_com;
@@ -333,8 +389,9 @@ impl World {
         })
     }
 
+    /// Turns the stand toward `stand_angle`, returning whether it carried the cake round.
     #[expect(clippy::float_cmp, reason = "a sweep that stopped short returns any other angle")]
-    fn step_stand(&mut self, stand_angle: i32) {
+    fn step_stand(&mut self, stand_angle: i32) -> bool {
         let from_rad = self.stand_angle_rad;
         let max_step_rad = STAND_SPEED_RAD_PER_S * DT_S;
         let step_rad = (calc_radians(stand_angle) - from_rad).clamp(-max_step_rad, max_step_rad);
@@ -348,9 +405,11 @@ impl World {
             cake.set_angvel(Vector::ZERO, false);
         }
         let turn_rad = self.stand_angle_rad - from_rad;
-        if turn_rad != 0.0 && self.is_riding_stand() {
+        let is_carried = turn_rad != 0.0 && self.is_riding_stand();
+        if is_carried {
             self.carry_cake_round(turn_rad);
         }
+        is_carried
     }
 
     /// Whether the cake is free and sits on the stand, so that it turns with it.

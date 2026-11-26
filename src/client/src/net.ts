@@ -4,6 +4,8 @@
  * down as little-endian binary frames.
  */
 
+import { type DebugSettings, IS_DEBUG_PAGE } from "./debug";
+
 /** Floats per pose record: the cake's translation and rotation quaternion, the knife's tilt, lowering, and rest, the stand's angle. */
 const POSE_FLOATS = 11;
 /** Bytes per pose record: id, tick, and flags as u32, then the floats as f32. */
@@ -36,8 +38,8 @@ export interface Standing {
   has_touched: boolean;
 }
 
-/** The next round's cake, always a real one, and whether the host picked Random, which the server settled on it. */
-export type PickMessage = { type: "pick"; cake: string; is_random: boolean };
+/** The next round's cake, always a real one, its length, and whether the host picked Random, which the server settled on it. */
+export type PickMessage = { type: "pick"; cake: string; is_random: boolean; round_ticks: number };
 
 /** A round's standings, best first, and everyone in the room in the order they give their standup update. */
 export type ResultsMessage = { type: "results"; standings: Standing[]; standup: Member[] };
@@ -53,8 +55,19 @@ export type CutMessage = {
   is_cut_through: boolean;
 };
 
-/** The judging reveal begun `elapsed_ms` ago: each round player in `order`, a scene of `scene_ms` apiece, judged by their standing. */
-export type JudgingMessage = { type: "judging"; order: number[]; scene_ms: number; elapsed_ms: number; standings: Standing[] };
+/**
+ * The judging reveal begun `elapsed_ms` ago: each round player in `order`, judged by their
+ * standing, in a scene of `hold_ms`, then their count's matching `count_ms`, then `after_ms`.
+ */
+export type JudgingMessage = {
+  type: "judging";
+  order: number[];
+  hold_ms: number;
+  count_ms: number[];
+  after_ms: number;
+  elapsed_ms: number;
+  standings: Standing[];
+};
 
 /** To a page reopened into its seat in a round: every tick its world stepped, as runs of one input in the core's wire format, and the tick it cut at, if it has. */
 export type ResumeMessage = { type: "resume"; runs: { ticks: number; input: number[] }[]; cut_tick: number | null };
@@ -65,10 +78,14 @@ export type ServerMessage =
   | RoomMessage
   | PickMessage
   | { type: "claim_refused" }
-  /** The round's players named as it started, so a page that joins after one left can still label them. */
+  /** A join refused because a player whose page is connected has the same name, ignoring case and surrounding spaces. The server closes the connection after it. */
+  | { type: "name_taken" }
+  /** The round's players named as they started or joined it, so a page that joins after one left can still label them. */
   | { type: "round"; cake: string; round_ticks: number; players: Member[] }
-  /** The round's players whose page had not loaded the cake when it started, who spectate it instead. */
-  | { type: "sit_out"; players: number[] }
+  /** The round's players whose page has yet to load the cake, who play once it has, their views showing from `now_playing` on. */
+  | { type: "still_loading"; players: number[] }
+  /** A round player who loaded the cake after the round started, or joined it in play, now plays it. */
+  | { type: "now_playing"; player: Member }
   | { type: "start"; elapsed_ms: number }
   | CutMessage
   /** Every round player has cut; the judging follows once the opponents' tiles have played the last cut. */
@@ -76,10 +93,16 @@ export type ServerMessage =
   | JudgingMessage
   | ResultsMessage
   | { type: "desync"; tick: number }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  /** The room's debug settings, to `?debug` pages only. */
+  | ({ type: "debug" } & DebugSettings);
 
 type ClientMessage =
-  | { type: "join"; name: string; standup_preference: number; seat: string | null }
+  | { type: "join"; name: string; standup_preference: number; has_scrum_update: boolean; seat: string | null; is_debug?: true }
+  | { type: "add_bot" }
+  | { type: "remove_bot" }
+  | { type: "set_round_length"; round_s: number }
+  | { type: "set_bot_latency"; latency_ms: number }
   | { type: "claim_host"; password: string }
   | { type: "pick"; cake: string }
   | { type: "start" }
@@ -115,12 +138,92 @@ export interface Profile {
   name: string;
   /** From 0, first to give their update, to 1, last. */
   standupPreference: number;
+  /** Whether they have a scrum update to give, without which they get no standup slot and the preference goes unused. */
+  hasScrumUpdate: boolean;
+}
+
+/** How long this page's messages take to and from the server beyond the network's own time, each way, which only a `?debug` page sets. */
+let simulatedLatencyMs = 0;
+/** How far each message's simulated latency strays at random either side of `simulatedLatencyMs`. */
+let simulatedJitterMs = 0;
+/** Until when, on `performance.now()`'s clock, every message this page sends waits, as a TCP stream waits on a lost packet's resend. */
+let sendsHeldUntilMs = 0;
+
+/** Delays every message this page sends or receives by `latencyMs` from now on, each way, to see the game on a slower network. */
+export function setSimulatedLatencyMs(latencyMs: number): void {
+  simulatedLatencyMs = latencyMs;
+  console.info(`simulating ${latencyMs} ms of latency each way`);
+}
+
+/** Strays each message's simulated latency from now on by up to `jitterMs` either side, at random, keeping the messages in order as TCP does. */
+function setSimulatedJitterMs(jitterMs: number): void {
+  simulatedJitterMs = jitterMs;
+  console.info(`simulating ${jitterMs} ms of jitter each way`);
+}
+
+/** Holds every message this page sends for the next `holdMs`, then lets them go on together, as a lost packet's resend holds a TCP stream. */
+function holdSimulatedSends(holdMs: number): void {
+  sendsHeldUntilMs = performance.now() + holdMs;
+  console.info(`holding sends for ${holdMs} ms`);
+}
+
+if (IS_DEBUG_PAGE) Object.assign(window, { setSimulatedJitterMs, holdSimulatedSends });
+
+declare global {
+  interface Window {
+    /** On a `?debug` page, for step files: strays this page's simulated latency at random, each way. */
+    setSimulatedJitterMs?: typeof setSimulatedJitterMs;
+    /** On a `?debug` page, for step files: holds this page's sends, as a lost packet does. */
+    holdSimulatedSends?: typeof holdSimulatedSends;
+  }
+}
+
+/**
+ * Hands each item on `simulatedLatencyMs`, strayed by up to `simulatedJitterMs`, after it was
+ * pushed, or after `heldUntilMs` if that is later, in the order pushed, so a latency lowered
+ * meanwhile never lets a later item overtake an earlier one. With no latency and nothing
+ * waiting, an item goes on at once.
+ */
+class DelayLine<T> {
+  private readonly waiting: { dueMs: number; item: T }[] = [];
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private readonly onDue: (item: T) => void,
+    private readonly getHeldUntilMs: () => number = () => 0,
+  ) {}
+
+  push(item: T): void {
+    const nowMs = performance.now();
+    const strayMs = simulatedJitterMs * (2 * Math.random() - 1);
+    const dueMs = Math.max(nowMs + simulatedLatencyMs + strayMs, this.getHeldUntilMs() + simulatedLatencyMs, this.waiting.at(-1)?.dueMs ?? 0);
+    if (dueMs <= nowMs && this.waiting.length === 0) {
+      this.onDue(item);
+      return;
+    }
+    this.waiting.push({ dueMs, item });
+    this.schedule();
+  }
+
+  private schedule(): void {
+    if (this.timer !== null || this.waiting.length === 0) return;
+    this.timer = setTimeout(() => this.release(), Math.max(this.waiting[0].dueMs - performance.now(), 0));
+  }
+
+  private release(): void {
+    this.timer = null;
+    const nowMs = performance.now();
+    while (this.waiting.length > 0 && this.waiting[0].dueMs <= nowMs) this.onDue(this.waiting.shift()!.item);
+    this.schedule();
+  }
 }
 
 export class Net {
   /** Every player's latest pose in the newest round, by id. */
   readonly poses = new Map<number, PlayerPose>();
   private readonly socket: WebSocket;
+  private readonly outgoing: DelayLine<string | Int32Array<ArrayBuffer>>;
+  private readonly incoming: DelayLine<MessageEvent | CloseEvent>;
   private isLeaving = false;
 
   /**
@@ -131,22 +234,22 @@ export class Net {
   constructor(url: URL, profile: Profile, seat: string | null, onMessage: (message: ServerMessage) => void, onClose: () => void) {
     this.socket = new WebSocket(url);
     this.socket.binaryType = "arraybuffer";
-    this.socket.addEventListener("open", () => this.sendJson({ type: "join", name: profile.name, standup_preference: profile.standupPreference, seat }));
-    this.socket.addEventListener("close", (event) => {
+    this.outgoing = new DelayLine((data) => this.socket.send(data), () => sendsHeldUntilMs);
+    this.incoming = new DelayLine((event) => {
       if (this.isLeaving) return;
-      console.error(`server connection closed: ${event.code} ${event.reason}`);
-      onClose();
-    });
-    this.socket.addEventListener("message", (event) => {
-      if (this.isLeaving) return;
-      if (event.data instanceof ArrayBuffer) {
-        this.readPoses(event.data);
+      if (event instanceof CloseEvent) {
+        console.error(`server connection closed: ${event.code} ${event.reason}`);
+        onClose();
         return;
       }
-      const message = JSON.parse(event.data as string) as ServerMessage;
-      if (message.type === "round") this.poses.clear();
-      onMessage(message);
+      this.onMessage(event, onMessage);
     });
+    this.socket.addEventListener("open", () => {
+      const join = { type: "join", name: profile.name, standup_preference: profile.standupPreference, has_scrum_update: profile.hasScrumUpdate, seat } as const;
+      this.sendJson(IS_DEBUG_PAGE ? { ...join, is_debug: true } : join);
+    });
+    this.socket.addEventListener("close", (event) => this.incoming.push(event));
+    this.socket.addEventListener("message", (event) => this.incoming.push(event));
   }
 
   /** The input `Controls.stepInput` built, stamped with the tick it steps the world from. */
@@ -154,7 +257,37 @@ export class Net {
     const frame = new Int32Array(1 + encoded.length);
     frame[0] = tick;
     frame.set(encoded, 1);
-    this.socket.send(frame);
+    this.outgoing.push(frame);
+  }
+
+  /** From a `?debug` page: adds a bot to the room. */
+  sendAddBot(): void {
+    this.sendJson({ type: "add_bot" });
+  }
+
+  /** From a `?debug` page: removes the room's newest bot. */
+  sendRemoveBot(): void {
+    this.sendJson({ type: "remove_bot" });
+  }
+
+  /** From a `?debug` page: sets the length of the rounds started from now on. */
+  sendSetRoundLength(roundS: number): void {
+    this.sendJson({ type: "set_round_length", round_s: roundS });
+  }
+
+  /** From a `?debug` page: sets the bots' latency each way. */
+  sendSetBotLatency(latencyMs: number): void {
+    this.sendJson({ type: "set_bot_latency", latency_ms: latencyMs });
+  }
+
+  private onMessage(event: MessageEvent, onMessage: (message: ServerMessage) => void): void {
+    if (event.data instanceof ArrayBuffer) {
+      this.readPoses(event.data);
+      return;
+    }
+    const message = JSON.parse(event.data as string) as ServerMessage;
+    if (message.type === "round") this.poses.clear();
+    onMessage(message);
   }
 
   /** Leaves the room for good, with no `onClose` and no more messages. */
@@ -192,7 +325,7 @@ export class Net {
   }
 
   private sendJson(message: ClientMessage): void {
-    this.socket.send(JSON.stringify(message));
+    this.outgoing.push(JSON.stringify(message));
   }
 
   private readPoses(frame: ArrayBuffer): void {

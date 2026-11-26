@@ -21,8 +21,9 @@ pub const BLADE_THICKNESS_M: f64 = 0.002;
 /// The two upright handles rise from the back's ends.
 pub const HANDLE_RADIUS_M: f64 = 0.014;
 pub const HANDLE_LEN_M: f64 = 0.09;
-/// The tilt every round starts at, leaned away from any useful cut.
-pub const START_TILT_RAD: f64 = MAX_TILT_RAD;
+/// The tilt every round starts at, leaned away from any useful cut yet inside the limit, so a
+/// first drag either way visibly moves the knife.
+pub const START_TILT_RAD: f64 = MAX_TILT_RAD * 2.0 / 3.0;
 /// The edge's fixed direction: the cake turns on its stand instead of the knife turning.
 const EDGE: DVec3 = DVec3::Z;
 const BLADE_HULL_SEGMENTS: u32 = 16;

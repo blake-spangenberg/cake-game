@@ -142,13 +142,14 @@ h1,
 
 /*
  * Chrome compiles a GPU pipeline the first time it paints the pie's conic gradient, which stalled
- * a fresh browser's first round start for 100-700 ms. So a pie paints over the lobby, too faint
- * to see, and the round's countdown finds the pipeline compiled. Under the opaque lobby Chrome
- * skips painting it while no WebGL canvas lies between them, as before the player joins.
+ * a fresh browser's first round start for 100-700 ms. So a pie paints over the lobby and over
+ * "Loading...", too faint to see, and the round's countdown finds the pipeline compiled. Under an
+ * opaque cover Chrome skips painting it while no WebGL canvas lies between them, as before the
+ * player joins, so it sits above every cover.
  */
 #clock-warmup {
   position: absolute;
-  z-index: 1;
+  z-index: 6;
   top: 16px;
   left: 16px;
   display: none;
@@ -156,8 +157,46 @@ h1,
   pointer-events: none;
 }
 
-body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
+body:has(#lobby:not([hidden], .is-rules)) #clock-warmup,
+body:has(#loading:not([hidden])) #clock-warmup {
   display: block;
+}
+
+/*
+ * "Loading..." while the page has nothing else to show, or a fatal error over everything, alone
+ * and centered over the whole page, so no other part of the page is kept for a status message.
+ */
+.screen-message {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  box-sizing: border-box;
+  background: var(--panel);
+  color: var(--cream);
+  text-align: center;
+}
+
+.screen-message[hidden] {
+  display: none;
+}
+
+/* The bakery script's outline at 44px type: 1000 units to the em. */
+#loading svg {
+  width: auto;
+  height: 63px;
+}
+
+/* The join dialog is what shows while it is open, so "Loading..." only covers the page behind it. */
+body:has(#join[open]) #loading {
+  color: transparent;
+}
+
+#fatal {
+  z-index: 5;
+  font-size: 24px;
 }
 
 .clock-seconds {
@@ -255,10 +294,13 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
   color: inherit;
 }
 
+/* One page that scrolls as a whole, with Close kept in view along its bottom edge. */
 #credits {
   max-width: 480px;
   max-height: 90vh;
-  padding: 20px 28px;
+  padding: 20px 28px 0;
+  box-sizing: border-box;
+  overflow-y: auto;
   border: none;
   border-radius: 8px;
   background: #2a2724;
@@ -281,15 +323,17 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
 }
 
 #credits ul {
-  max-height: 28vh;
-  overflow-y: auto;
   margin: 0;
   padding-left: 18px;
   line-height: 1.5;
 }
 
 #credits form {
-  margin-top: 16px;
+  position: sticky;
+  bottom: 0;
+  margin-top: 8px;
+  padding: 10px 0 16px;
+  background: #2a2724;
   text-align: right;
 }
 
@@ -349,12 +393,25 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
   gap: 8px;
 }
 
+/* The name, the scrum update, and the preference read as three groups, each label close to its control. */
+#join form {
+  gap: 6px;
+}
+
+#join .scrum-update {
+  margin-top: 18px;
+}
+
+#join #standup-preference {
+  margin-top: 8px;
+}
+
 #join label,
 #claim label {
   font-size: 14px;
 }
 
-#join input:not([type="range"]),
+#join input:not([type="range"], [type="checkbox"]),
 #claim input {
   padding: 8px 10px;
   border: none;
@@ -374,6 +431,43 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
   justify-content: space-between;
   font-size: 12px;
   opacity: 0.8;
+}
+
+#standup-preference {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+#standup-preference:disabled {
+  opacity: 0.4;
+}
+
+#join .scrum-update {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+#join .scrum-update input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+#name-taken {
+  margin: 0;
+  color: #ff8a7a;
+  font-size: 14px;
+}
+
+#name-taken[hidden] {
+  display: none;
 }
 
 #claim-error {
@@ -406,7 +500,7 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
 }
 
 #join button {
-  margin-top: 8px;
+  margin-top: 18px;
 }
 
 #claim #claim-cancel,
@@ -423,19 +517,22 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
 
 /*
  * The lobby and the results fill the screen, covering the play view, so no table, cake, or stand
- * shows between rounds. The players run down one column beside the rules, and the results set the
- * leaderboard and the standup order side by side.
+ * shows between rounds: the invitation along the top, the columns centered under it, and the
+ * credits link and the buttons along the bottom. The players run down one column beside the
+ * rules, and the results set the leaderboard and the standup order side by side. Text grows a
+ * little with the window, from Zoom's side-by-side browser to a full HD screen.
  */
 #lobby {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
-  padding: 28px 48px 24px;
+  gap: 14px;
+  padding: 14px clamp(16px, 3vw, 48px) 18px;
   box-sizing: border-box;
   background: var(--panel);
   color: var(--cream);
-  font-size: 17px;
+  font-size: clamp(15px, calc(0.45vw + 10px), 19px);
 }
 
 #lobby[hidden],
@@ -443,35 +540,59 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
   display: none;
 }
 
-#lobby h1 {
-  margin: 0 0 12px;
-  font-size: 48px;
-  line-height: 1.3;
+#invite {
+  margin: 0;
+  color: rgb(244 234 216 / 80%);
+  font-size: 1.2em;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.invite-address {
+  margin: 0 0.1em;
+  color: #e0b04a;
+  font-size: 1.15em;
+  font-weight: 800;
+  line-height: 1;
 }
 
 #lobby h2 {
-  margin: 0 0 12px;
-  font-size: 22px;
+  margin: 0 0 0.6em;
+  font-size: 1.3em;
 }
 
 #lobby-screen,
 #tally {
   display: flex;
   flex: 1;
-  gap: 48px;
+  gap: clamp(24px, 3.5vw, 64px);
+  justify-content: center;
   min-height: 0;
+}
+
+/* The rules size themselves by the height this leaves them. */
+#lobby-screen {
+  container-type: size;
 }
 
 #lobby-players {
   display: flex;
+  flex: none;
   flex-direction: column;
-  width: 320px;
+  width: clamp(200px, 22vw, 320px);
   min-height: 0;
 }
 
+/*
+ * As wide as the height lets the two rows of 4:3 stills grow, after the heading, their captions,
+ * and the camera's controls under them (about 18.8em, at three lines a caption and two lines of controls), up to the stills'
+ * own width. A narrow window shrinks them to fit the row instead.
+ */
 #how-to-play {
-  flex: 1;
-  max-width: 560px;
+  --rules-column-gap: 16px;
+  flex: 0 1 auto;
+  width: min(1296px, calc((100cqh - 18.8em) * 4 / 3 + var(--rules-column-gap)));
+  min-width: 0;
 }
 
 /* A spectator watches the round with the rules in a card over the play view's empty top left, beside the opponents' tiles. */
@@ -484,19 +605,23 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
   font-size: 13px;
 }
 
-#lobby.is-rules h1,
+#lobby.is-rules #invite,
 #lobby.is-rules #lobby-players,
-#lobby.is-rules #credits-link {
+#lobby.is-rules #lobby-bar {
   display: none;
+}
+
+#lobby.is-rules #lobby-screen {
+  container-type: normal;
+}
+
+#lobby.is-rules #how-to-play {
+  width: auto;
 }
 
 #lobby.is-rules h2 {
   margin-bottom: 8px;
   font-size: 17px;
-}
-
-#lobby.is-rules #lobby-bar {
-  margin-top: 10px;
 }
 
 #players,
@@ -568,21 +693,85 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
 }
 
 .standing-rank {
-  width: 2em;
+  width: 2.4em;
   text-align: right;
 }
 
-#lobby-bar {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  margin-top: 20px;
+/* A score of a knife that missed the cake, `Miss`, wherever 0.0% would show. */
+.is-miss {
+  color: #ff5a4c;
 }
 
-#lobby-status {
-  flex: 1;
-  margin: 0;
-  font-style: italic;
+/*
+ * The top three places' medal beside a name on the leaderboards and the standup order: a disc
+ * (`::after`) hung from a ribbon (`::before`) behind it. Every row keeps the slot, so names line up.
+ */
+.medal {
+  position: relative;
+  flex: none;
+  width: 1.15em;
+  height: 1.15em;
+}
+
+.medal-1 {
+  --medal-shine: #fff4c4;
+  --medal-face: #e2b23a;
+  --medal-rim: #95680f;
+}
+
+.medal-2 {
+  --medal-shine: #ffffff;
+  --medal-face: #c3c9d0;
+  --medal-rim: #6f767e;
+}
+
+.medal-3 {
+  --medal-shine: #ffd9b8;
+  --medal-face: #c47b3c;
+  --medal-rim: #6f3f1a;
+}
+
+.medal-1::before,
+.medal-2::before,
+.medal-3::before {
+  position: absolute;
+  top: -0.2em;
+  left: 0.2em;
+  width: 0.75em;
+  height: 0.65em;
+  background: linear-gradient(90deg, #c8343c 0 50%, #2f5ea8 50%);
+  clip-path: polygon(0 0, 100% 0, 72% 100%, 28% 100%);
+  content: "";
+}
+
+.medal-1::after,
+.medal-2::after,
+.medal-3::after {
+  position: absolute;
+  inset: 0.15em 0.05em -0.05em;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, var(--medal-shine) 0 12%, var(--medal-face) 50%, var(--medal-rim) 100%);
+  box-shadow: inset 0 0 0 1.5px var(--medal-rim);
+  content: "";
+}
+
+/* Credits in the bottom left corner, and the buttons in the middle, centered on the page whatever the corner holds. */
+#lobby-bar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 12px;
+  align-items: center;
+}
+
+#lobby-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: center;
+}
+
+#lobby-bar button {
+  font-size: 1.05em;
 }
 
 #picker {
@@ -653,15 +842,21 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
 }
 
 #credits-link {
+  justify-self: start;
   color: inherit;
-  font-size: 14px;
+  font-size: 0.9em;
 }
 
-/* The ?fps readout, in the corner the play view leaves empty: the table's near leg at most. */
-#fps {
+/*
+ * The ?debug readouts, side by side in the corner the play view leaves empty, the table's near
+ * leg at most, and below the lobby's bottom bar.
+ */
+#fps,
+#round-timer {
   position: absolute;
-  bottom: 8px;
+  bottom: 2px;
   left: 8px;
+  z-index: 3;
   padding: 2px 8px;
   border-radius: 6px;
   background: rgb(29 27 25 / 70%);
@@ -670,6 +865,53 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
   font-variant-numeric: tabular-nums;
   white-space: pre;
   pointer-events: none;
+}
+
+#round-timer {
+  left: 160px;
+}
+
+#round-timer[hidden] {
+  display: none;
+}
+
+/* The ?debug lobby's controls, plain, in one column beside the rules. */
+#debug-panel {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 8px;
+  width: 200px;
+  font-size: 14px;
+}
+
+#debug-panel p {
+  margin: 0;
+}
+
+#debug-panel .host-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#debug-panel .host-controls[hidden] {
+  display: none;
+}
+
+#debug-panel label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+#debug-panel input {
+  width: 64px;
+}
+
+#lobby.is-rules #debug-panel {
+  display: none;
 }
 
 /*
@@ -782,4 +1024,26 @@ body:has(#lobby:not([hidden], .is-rules)) #clock-warmup {
     color: var(--panel);
     transform: translateX(-24px);
   }
+}
+
+/* Below the countdown, over the play view and the lobby alike, where the browser stopped the page's sound until a click resumes it. */
+#sound-note {
+  position: absolute;
+  top: 84px;
+  left: calc(50% - var(--view-shift, 0px));
+  z-index: 2;
+  padding: 6px 16px;
+  border: none;
+  border-radius: 16px;
+  background: #f4ead8;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  color: #1d1b19;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+
+#sound-note[hidden] {
+  display: none;
 }

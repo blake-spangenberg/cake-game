@@ -32,8 +32,9 @@ pub const STAND_PARTS: [StandPart; 3] = [
     },
     StandPart { radius_m: STAND_BASE_RADIUS_M, y0_m: 0.0, y1_m: STAND_BASE_THICKNESS_M },
 ];
-/// The longest side of any cake's bounding box.
-pub const MAX_CAKE_SIDE_M: f64 = 0.25;
+/// The longest side of any cake's bounding box, as long as the extent bound allows, so a slender
+/// cake such as the Electric Guitar can almost span the stand's plate.
+pub const MAX_CAKE_SIDE_M: f64 = MAX_CAKE_EXTENT_M;
 /// The most any cake's [`crate::mesh::Mesh::calc_extent_bound`] may be, so no pose of it stands
 /// taller.
 pub const MAX_CAKE_EXTENT_M: f64 = 0.34;

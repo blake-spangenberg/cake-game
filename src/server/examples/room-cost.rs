@@ -62,7 +62,13 @@ fn main() {
         _ => panic!("scenario: expected typical, pressing, or throwing, got {scenario}"),
     };
     // The judging reveal steps no world, so timing stops where it starts.
-    let config = RoomConfig { judging_scene_ms: 0, judging_tail_ms: 0, ..RoomConfig::default() };
+    let config = RoomConfig {
+        judging_hold_ms: 0,
+        judging_max_count_ms: 0,
+        judging_after_ms: 0,
+        judging_tail_ms: 0,
+        ..RoomConfig::default()
+    };
     let mut room = Room::create(config, Catalog::create([("cake".to_string(), model)]));
     let mut inboxes = Vec::new();
     for id in 1..=player_len {
@@ -71,8 +77,9 @@ fn main() {
         let join = RoomEvent::Join {
             connection: id,
             name: format!("P{id}"),
-            standup_preference: 0.5,
+            standup_preference: Some(0.5),
             seat: None,
+            is_debug: false,
             outbox,
             assigned,
         };

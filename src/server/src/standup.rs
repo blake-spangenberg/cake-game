@@ -2,38 +2,43 @@
 //! updates in.
 //!
 //! Players choose slots in leaderboard order, best first, each taking the open slot
-//! closest to their preference, and spectators choose after every player, in join order.
+//! closest to their preference, and spectators choose after every player, in join order. Anyone
+//! without a scrum update gets no slot.
 
 use std::hash::{BuildHasher, RandomState};
 
 use crate::protocol::PlayerId;
 
-/// Someone choosing a slot, with their preference from 0 (first to give their update) to 1 (last).
+/// Someone in the order of choosing, with their preference from 0 (first to give their update) to
+/// 1 (last), or none if they have no scrum update to give.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Chooser {
     pub id: PlayerId,
-    pub preference: f64,
+    pub preference: Option<f64>,
 }
 
-/// The ids of `choosers`, given in the order they choose, listed in slot order.
+/// The ids of `choosers` with a scrum update, given in the order they choose, listed in slot order.
 ///
-/// Each takes the open slot nearest their preference spread across every slot, and of two equally
-/// near the earlier, so the last to choose takes the last slot left.
+/// There is a slot for each of them. Each takes the open slot nearest their preference spread
+/// across every slot, and of two equally near the earlier, so the last to choose takes the last
+/// slot left.
 #[must_use]
 #[expect(clippy::cast_precision_loss, reason = "slot counts far below f64's whole-number range")]
-#[expect(clippy::missing_panics_doc, reason = "there are as many slots as choosers")]
+#[expect(clippy::missing_panics_doc, reason = "there are as many slots as choosers with an update")]
 pub fn calc_standup_order(choosers: &[Chooser]) -> Vec<PlayerId> {
-    let last_idx = choosers.len().saturating_sub(1) as f64;
-    let mut slots: Vec<Option<PlayerId>> = vec![None; choosers.len()];
-    for chooser in choosers {
-        let wanted = chooser.preference * last_idx;
+    let updates: Vec<(PlayerId, f64)> =
+        choosers.iter().filter_map(|chooser| chooser.preference.map(|preference| (chooser.id, preference))).collect();
+    let last_idx = updates.len().saturating_sub(1) as f64;
+    let mut slots: Vec<Option<PlayerId>> = vec![None; updates.len()];
+    for &(id, preference) in &updates {
+        let wanted = preference * last_idx;
         let distance = |idx: usize| (idx as f64 - wanted).abs();
         // `min_by` keeps the first of equal elements, which is the earlier slot.
         let idx = (0..slots.len())
             .filter(|&idx| slots[idx].is_none())
             .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
             .expect("every chooser finds a slot open");
-        slots[idx] = Some(chooser.id);
+        slots[idx] = Some(id);
     }
     slots.into_iter().map(|slot| slot.expect("every slot is taken")).collect()
 }
@@ -56,12 +61,12 @@ pub fn order_choosers(
     order
 }
 
-/// Shuffles `ids` into a random order, each order equally likely.
+/// Shuffles `items` into a random order, each order equally likely.
 #[expect(clippy::cast_possible_truncation, reason = "keeps the random hash's low bits")]
-pub fn shuffle_randomly(ids: &mut [PlayerId]) {
+pub fn shuffle_randomly<T>(items: &mut [T]) {
     let random = RandomState::new();
-    for idx in (1..ids.len()).rev() {
+    for idx in (1..items.len()).rev() {
         let other = random.hash_one(idx) as usize % (idx + 1);
-        ids.swap(idx, other);
+        items.swap(idx, other);
     }
 }

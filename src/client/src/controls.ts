@@ -48,6 +48,8 @@ const TILT_SIGN_MIN_TRAVEL_PX = 0.02;
  */
 export class Controls {
   private drag: Drag | null = null;
+  /** What a press where the pointer is would grab, as of its last move over the canvas. */
+  private hoverKind: PickKind | null = null;
   private readonly lastPx = new THREE.Vector2();
   private readonly raycaster = new THREE.Raycaster();
   private readonly tilt = new Spring(0, KNIFE_HALF_LIFE_S);
@@ -78,8 +80,12 @@ export class Controls {
     const canvas = scene.renderer.domElement;
     canvas.addEventListener("pointerdown", (event) => this.onPointerDown(event));
     canvas.addEventListener("pointermove", (event) => this.onPointerMove(event));
-    canvas.addEventListener("pointerup", () => this.onPointerUp());
+    canvas.addEventListener("pointerup", (event) => {
+      this.onPointerUp();
+      this.updateHover(event);
+    });
     canvas.addEventListener("pointercancel", () => this.onPointerUp());
+    canvas.addEventListener("pointerleave", () => this.onPointerLeave());
     canvas.addEventListener("contextmenu", (event) => event.preventDefault());
     canvas.addEventListener(
       "wheel",
@@ -110,6 +116,12 @@ export class Controls {
     const encoded = new Int32Array(ENCODED_LEN);
     encoded[6] = this.quantizeRad(game.get_knife_pose()[0]);
     return encoded;
+  }
+
+  /** What a drag is moving, or else what a press where the pointer is would grab, or none for the camera or empty space. */
+  findHighlightKind(): PickKind | null {
+    if (!this.drag) return this.hoverKind;
+    return this.drag.kind === "camera" ? null : this.drag.kind;
   }
 
   /**
@@ -187,7 +199,7 @@ export class Controls {
   private onPointerMove(event: PointerEvent): void {
     const drag = this.drag;
     if (!drag) {
-      this.updateCursor(this.scene.pick(this.aim(event))?.kind ?? null);
+      this.updateHover(event);
       return;
     }
     const dxPx = event.clientX - this.lastPx.x;
@@ -221,6 +233,17 @@ export class Controls {
     }
     this.drag = null;
     this.updateCursor(null);
+  }
+
+  private onPointerLeave(): void {
+    if (this.drag) return;
+    this.hoverKind = null;
+    this.updateCursor(null);
+  }
+
+  private updateHover(event: PointerEvent): void {
+    this.hoverKind = this.scene.pick(this.aim(event))?.kind ?? null;
+    this.updateCursor(this.hoverKind);
   }
 
   /** Meters on the table per pixel of mouse travel at the grabbed point's depth. */

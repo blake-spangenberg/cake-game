@@ -2,6 +2,7 @@
 //! over WebSocket on one plain-HTTP port, replaying every player's inputs in its own copy of their
 //! world to score them.
 
+pub mod bot;
 pub mod catalog;
 mod files;
 pub mod protocol;
@@ -27,20 +28,21 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
 
 use protocol::{ClientMessage, FrameError, PlayerId, decode_input_frame};
-use room::{ConnectionId, Frame, Room, RoomEvent, create_outbox};
+use room::{ConnectionId, DebugCommand, Frame, NameTaken, NextStep, Room, RoomEvent, create_outbox};
 
 /// The longest name a player may type, in characters.
 pub const MAX_NAME_LEN: usize = 24;
 /// The largest WebSocket message a client may send, in bytes, past which its connection closes.
 ///
 /// The largest a client has cause to send is a join with a name of [`MAX_NAME_LEN`] four-byte
-/// characters, a preference of 17 significant digits, and a seat token, about 215 bytes.
+/// characters, a preference of 17 significant digits, no scrum update, a seat token, and the
+/// `?debug` flag, about 245 bytes.
 pub const MAX_MESSAGE_SIZE: usize = 256;
 /// Text messages a connection may send at once, past which it must keep to
 /// [`TEXT_MESSAGES_PER_S`] or be closed.
 ///
-/// A page sends a hash a second and a control message
-/// per click, while each of some, such as a host claim, costs a message to every player.
+/// A page sends a hash a second and a control message per click, while each of some, such as a
+/// host claim, costs a message to every player.
 pub const TEXT_MESSAGE_BURST: u32 = 30;
 pub const TEXT_MESSAGES_PER_S: u32 = 10;
 /// Events the connections may have waiting for the room, past which each waits its turn to add
@@ -73,8 +75,9 @@ pub struct PreferenceOutOfRange;
 /// Serves `client_dir` and the room's WebSocket at `ws` on `listener` until the listener fails or
 /// the room stops.
 ///
-/// The room runs on its own thread, stepping at the simulation's tick rate, and stops only by
-/// panicking, which the panic hook logs.
+/// The room runs on its own thread, stepping at the simulation's tick rate while a round loads,
+/// plays, or is judged, and otherwise only as a held seat expires, and stops only by panicking,
+/// which the panic hook logs.
 ///
 /// # Errors
 /// When the room's thread or runtime cannot start, `client_dir` cannot be read, serving fails,
@@ -127,27 +130,54 @@ pub fn validate_standup_preference(preference: f64) -> Result<f64, PreferenceOut
     Ok(preference)
 }
 
+/// Steps `room` as often as it asks, at most once per [`STEP_INTERVAL`], and gives it every event,
+/// so a room with nothing timed on wakes the host's CPU only for events.
 async fn run_room(mut room: Room, mut events: Receiver<RoomEvent>) {
     let start = Instant::now();
+    // The earliest the next step may run, which keeps the steps a tick apart.
     let mut next_step = start;
     loop {
+        let step_at = find_step_instant(room.get_next_step(), start, next_step);
         tokio::select! {
             // A step that is due goes before any event waiting, however many connections send.
             biased;
-            () = tokio::time::sleep_until(next_step) => {
+            due = sleep_until_some(step_at) => {
                 let now = Instant::now();
                 room.step(calc_ms_since(start, now));
                 // A step that overran its interval skips the steps it missed rather than bunching them.
-                next_step = (next_step + STEP_INTERVAL).max(now);
+                next_step = (due + STEP_INTERVAL).max(now);
             }
             event = events.recv() => {
                 let Some(event) = event else {
                     return;
                 };
-                room.on_event(event, calc_ms_since(start, Instant::now()));
+                let now = Instant::now();
+                room.on_event(event, calc_ms_since(start, now));
+                // After a wait on events alone, a step this event makes due, as a round's start
+                // does, runs at once and the next a tick later, rather than two at once.
+                next_step = next_step.max(now);
             }
         }
     }
+}
+
+/// When the room's next step is due, none while it waits for an event.
+fn find_step_instant(next: NextStep, start: Instant, next_step: Instant) -> Option<Instant> {
+    match next {
+        NextStep::EveryTick => Some(next_step),
+        // Out of the clock's range is never.
+        NextStep::At { at_ms } => start.checked_add(Duration::from_millis(at_ms)).map(|at| at.max(next_step)),
+        NextStep::AfterEvent => None,
+    }
+}
+
+/// Sleeps until `at` and returns it, or sleeps forever without one.
+async fn sleep_until_some(at: Option<Instant>) -> Instant {
+    let Some(at) = at else {
+        return std::future::pending().await;
+    };
+    tokio::time::sleep_until(at).await;
+    at
 }
 
 fn calc_ms_since(start: Instant, now: Instant) -> u64 {
@@ -163,18 +193,27 @@ async fn on_upgrade(upgrade: WebSocketUpgrade, State(state): State<AppState>) ->
 
 async fn run_connection(mut socket: WebSocket, state: AppState) {
     let mut text_rate = TextRate::create(Instant::now());
-    let Some(Joining { name, standup_preference, seat }) = wait_join(&mut socket, &mut text_rate).await else {
+    let Some(Joining { name, standup_preference, seat, is_debug }) = wait_join(&mut socket, &mut text_rate).await
+    else {
         return;
     };
     let connection = state.next_connection.fetch_add(1, Ordering::Relaxed);
     let (outbox, mut inbox) = create_outbox();
     let (assigned, assigned_id) = tokio::sync::oneshot::channel();
-    let join = RoomEvent::Join { connection, name, standup_preference, seat, outbox, assigned };
+    let join = RoomEvent::Join { connection, name, standup_preference, seat, is_debug, outbox, assigned };
     if state.events.send(join).await.is_err() {
         return;
     }
-    let Ok(id) = assigned_id.await else {
-        return;
+    let id = match assigned_id.await {
+        Ok(Ok(id)) => id,
+        Ok(Err(NameTaken)) => {
+            let refusal =
+                serde_json::to_string(&protocol::ServerMessage::NameTaken).expect("server messages serialize");
+            // The page learns of the refusal from this message or, failing that, the close.
+            let _ = try_send_in_time(&mut socket, Message::Text(refusal.into())).await;
+            return;
+        }
+        Err(_) => return,
     };
     let mut ping = tokio::time::interval(PING_INTERVAL);
     let mut bad_frames = BadFrames::default();
@@ -283,11 +322,12 @@ async fn try_send_in_time(socket: &mut WebSocket, message: Message) -> bool {
     matches!(tokio::time::timeout(SEND_TIMEOUT, socket.send(message)).await, Ok(Ok(())))
 }
 
-/// A connection's validated join.
+/// A connection's validated join, its standup preference none without a scrum update.
 struct Joining {
     name: String,
-    standup_preference: f64,
+    standup_preference: Option<f64>,
     seat: Option<String>,
+    is_debug: bool,
 }
 
 /// The validated join from the connection's first join message, or none if it closes first,
@@ -301,12 +341,16 @@ async fn wait_join(socket: &mut WebSocket, text_rate: &mut TextRate) -> Option<J
             eprintln!("connection: text messages over {TEXT_MESSAGES_PER_S} a second before joining, disconnecting");
             return None;
         }
-        let Ok(ClientMessage::Join { name, standup_preference, seat }) = serde_json::from_str(text.as_str()) else {
+        let Ok(ClientMessage::Join { name, standup_preference, has_scrum_update, seat, is_debug }) =
+            serde_json::from_str(text.as_str())
+        else {
             eprintln!("connection: expected a join message, got {:?}", text.as_str());
             continue;
         };
         let validated = match (validate_name(&name), validate_standup_preference(standup_preference)) {
-            (Ok(name), Ok(standup_preference)) => Ok(Joining { name, standup_preference, seat }),
+            (Ok(name), Ok(standup_preference)) => {
+                Ok(Joining { name, standup_preference: has_scrum_update.then_some(standup_preference), seat, is_debug })
+            }
             (Err(error), _) => Err(format!("name refused: {error:?}")),
             (_, Err(PreferenceOutOfRange)) => Err(format!("standup preference {standup_preference} refused")),
         };
@@ -359,5 +403,13 @@ fn to_control_event(connection: ConnectionId, parsed: ClientMessage) -> Option<R
                 None
             }
         },
+        ClientMessage::AddBot => Some(RoomEvent::Debug { connection, command: DebugCommand::AddBot }),
+        ClientMessage::RemoveBot => Some(RoomEvent::Debug { connection, command: DebugCommand::RemoveBot }),
+        ClientMessage::SetRoundLength { round_s } => {
+            Some(RoomEvent::Debug { connection, command: DebugCommand::SetRoundLength { round_s } })
+        }
+        ClientMessage::SetBotLatency { latency_ms } => {
+            Some(RoomEvent::Debug { connection, command: DebugCommand::SetBotLatency { latency_ms } })
+        }
     }
 }

@@ -1,5 +1,5 @@
 /** The groups the cake picker lists cakes under, in the order it shows them. */
-export const CAKE_KINDS = ["Food", "Shoes", "Gloves", "Instruments", "Furniture", "Figures", "Animals", "Nature"] as const;
+export const CAKE_KINDS = ["Food", "Shoes", "Gloves", "Instruments", "Gadgets", "Furniture", "Figures", "Animals", "Nature"] as const;
 export type CakeKind = (typeof CAKE_KINDS)[number];
 
 /**
@@ -42,11 +42,13 @@ export const CAKES: readonly CakeEntry[] = [
   { id: "e4b7d4137f444265ad98fb02780ccc5e", name: "Garden Gnome", kind: "Figures", author: "tiozombi", license: "CC BY 4.0", repair: ["--first-use-vertex-order"] },
   { id: "ec9c0ac738fd4495af334ea2092e8d89", name: "Common Raven", kind: "Animals", author: "WirtualneMuzeaMalopolski", license: "CC0 1.0", repair: ["--plinth", "0.07", "0.014"] },
   { id: "c5fad940863f47f784d792ca95e16b42", name: "Tuna Fish", kind: "Animals", author: "dhjwdwd", license: "CC BY 4.0", repair: ["--turn", "z", "90"] },
-  { id: "daeadd913644438aa3096bb357a02016", name: "Electric Guitar", kind: "Instruments", author: "abazibiz", license: "CC BY 4.0", repair: ["--hull-open-pieces"] },
+  { id: "daeadd913644438aa3096bb357a02016", name: "Electric Guitar", kind: "Instruments", author: "abazibiz", license: "CC BY 4.0", repair: ["--hull-open-pieces", "--size-m", "0.335"] },
   { id: "4ce9e8dbeb74425eb215e4168807dcb5", name: "Grand Piano", kind: "Instruments", author: "richterbelmont26", license: "CC BY 4.0", repair: ["--join-within", "0.003"], bake: ["--trim-overhangs"] },
   { id: "c65a00ca4a174653beb4c59cb42b9143", name: "Mossy Log", kind: "Nature", author: "julianmalik", license: "CC BY 4.0" },
   { id: "fc6e731a0131471ba8e45511c7ea9996", name: "Marble Bust", kind: "Figures", author: "WirtualneMuzeaMalopolski", license: "CC0 1.0" },
   { id: "2e9082cfd8c444d9b3b1b20821a0e101", name: "Duck", kind: "Animals", author: "darwinmuseum.ru", license: "CC BY-NC 4.0", repair: ["--trim-below", "0.29"] },
+  { id: "1ca90c233cfd4fa0bd52077b37efde97", name: "Conch Shell", kind: "Nature", author: "jblock", license: "CC BY 4.0", repair: ["--hollow", "0.006", "0.006", "--inside-color", "176", "122", "104", "--max-triangles", "80000"] },
+  { id: "c8c3f307e93f4c829d579d1b369e6b02", name: "Camera", kind: "Gadgets", author: "Santy", license: "CC BY 4.0", repair: ["--recolor", "200", "0.5", "0.45", "--size-m", "0.235"] },
 ];
 
 /** The license deeds a credit links to, by the name it shows. */
@@ -57,11 +59,19 @@ const LICENSE_URLS = {
 } as const;
 type LicenseName = keyof typeof LICENSE_URLS;
 
-/** The credit line: the author, linked to the model's page so the license's link to the material is kept, and the license, linked to its terms. */
-export function buildCreditHtml(cake: CakeEntry): HTMLElement {
+/**
+ * The credit line, after `lead`: the author, linked to the model's page so the license's link to
+ * the material is kept, and the license, linked to its terms.
+ */
+function buildCreditHtml(cake: CakeEntry, lead: string): HTMLElement {
   const credit = document.createElement("span");
-  credit.append("by ", buildLink(cake.author, `https://sketchfab.com/3d-models/${cake.id}`), " (", buildLink(cake.license, LICENSE_URLS[cake.license]), ")");
+  credit.append(lead, buildLink(cake.author, `https://sketchfab.com/3d-models/${cake.id}`), " (", buildLink(cake.license, LICENSE_URLS[cake.license]), ")");
   return credit;
+}
+
+/** The credit line a round shows for its cake. */
+export function buildRoundCreditHtml(cake: CakeEntry): HTMLElement {
+  return buildCreditHtml(cake, "Model by ");
 }
 
 /** Every cake's credit line under its in-game name, alphabetically, for the credits page. */
@@ -69,7 +79,7 @@ export function buildCreditsList(): HTMLUListElement {
   const list = document.createElement("ul");
   for (const cake of [...CAKES].sort((a, b) => a.name.localeCompare(b.name))) {
     const item = document.createElement("li");
-    item.append(`${cake.name} `, buildCreditHtml(cake));
+    item.append(buildCreditHtml(cake, `${cake.name} by `));
     list.append(item);
   }
   return list;

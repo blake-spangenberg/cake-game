@@ -583,20 +583,58 @@ fn build_leaning_box_cake(half_m: f32, height_m: f32, past_balance_rad: f32, shi
     (model, lean_rad)
 }
 
-/// A box 6 cm wide and 10 cm tall set down on one bottom edge, leaning 4 mrad past balance, so the
-/// rolling resistance holds it to a creep that speeds up as it leans further. Nearer balance the
-/// creep stays under Rapier's own sleep threshold and the box rests balanced, as a soft cake may.
-#[test]
-fn box_set_down_just_past_balance_on_an_edge_tips_onto_its_side_rather_than_freezing() {
-    let (model, start_lean_rad) = build_leaning_box_cake(0.03, 0.1, 0.004, Vec3::ZERO);
+/// How far a box 6 cm wide and 10 cm tall, set down on one bottom edge leaning `past_balance_rad`
+/// past balance, has turned 5 s later, and how far it would turn to lie on its side.
+fn calc_leaning_box_turn_rad(past_balance_rad: f32) -> (f32, f32) {
+    let (model, start_lean_rad) = build_leaning_box_cake(0.03, 0.1, past_balance_rad, Vec3::ZERO);
     let mut world = World::create(model, START_TILT_RAD, None);
     for _ in 0..5 * TICKS_PER_S {
         world.step(&Input::default());
     }
     // From the release, lying on its side is a further quarter turn less the lean it started with.
     let turned_rad = world.get_cake_pose().rotation.angle_between(Rotation::IDENTITY);
-    let on_its_side_rad = core::f32::consts::FRAC_PI_2 - start_lean_rad;
+    (turned_rad, core::f32::consts::FRAC_PI_2 - start_lean_rad)
+}
+
+/// 30 mrad past balance its center of mass stands 1.7 mm past the edge, beyond the 1.2 mm the box's
+/// squash flattens there, so the rolling resistance holds it only to a creep that speeds up as it
+/// leans, and it tips rather than freezing.
+#[test]
+fn box_set_down_past_balance_on_an_edge_tips_onto_its_side_rather_than_freezing() {
+    let (turned_rad, on_its_side_rad) = calc_leaning_box_turn_rad(0.03);
     assert!((turned_rad - on_its_side_rad).abs() < 0.05, "it turned {turned_rad} rad, not {on_its_side_rad}");
+}
+
+/// 4 mrad past balance its center of mass stands 0.2 mm past the edge, over the patch the squash
+/// flattens, so it rests balanced as a soft cake would.
+#[test]
+fn box_set_down_a_hair_past_balance_on_an_edge_rests_on_its_squash() {
+    let (turned_rad, _) = calc_leaning_box_turn_rad(0.004);
+    assert!(turned_rad < 0.01, "it turned {turned_rad} rad");
+}
+
+/// Turning the stand wakes the cake it carries, and gravity would rock one only its squash holds a
+/// little off its pose each tick.
+#[test]
+fn box_resting_on_its_squash_on_the_stand_keeps_its_pose_through_eight_quarter_turns() {
+    let onto_plate = Vec3::new(0.05 - CAKE_SPAWN.x as f32, STAND_TOP_Y_M as f32, -CAKE_SPAWN.z as f32);
+    let (model, _) = build_leaning_box_cake(0.03, 0.1, 0.004, onto_plate);
+    let mut world = World::create(model, START_TILT_RAD, None);
+    for _ in 0..TICKS_PER_S {
+        world.step(&Input::default());
+    }
+    let rested = world.get_cake_pose();
+    for quarter_idx in 1..=8 {
+        let stand_angle = quantize_radians(f64::from(quarter_idx) * core::f64::consts::FRAC_PI_2);
+        for _ in 0..60 {
+            world.step(&Input { stand_angle, ..Input::default() });
+        }
+    }
+    // Eight quarter turns bring the stand round twice, back where it started.
+    let after = world.get_cake_pose();
+    let moved_m = after.translation.distance(rested.translation);
+    let turned_rad = after.rotation.angle_between(rested.rotation);
+    assert!(moved_m < 0.001 && turned_rad < 0.01, "it moved {moved_m} m and turned {turned_rad} rad");
 }
 
 #[test]

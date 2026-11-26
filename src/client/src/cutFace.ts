@@ -1,6 +1,7 @@
 /**
- * The inside of a cut cake: level sponge layers between thin bands of buttercream, laid out in the
- * cake model's own frame so they stay as baked whatever way the cake was set down or cut.
+ * The inside of a cut cake: level sponge layers between thin bands of buttercream, every other one
+ * with a thin stripe of jam under it, laid out in the cake model's own frame so they stay as baked
+ * whatever way the cake was set down or cut.
  */
 import * as THREE from "three";
 
@@ -10,11 +11,18 @@ import * as THREE from "three";
  */
 const SPONGE = 0xc08540;
 const BUTTERCREAM = 0xfff8ec;
+/** Raspberry jam, deep enough to read as red rather than pink between golden sponge and white cream. */
+const JAM = 0x9a1424;
 /** One sponge layer and the buttercream on it, as a layer cake is built. */
-const LAYER_PITCH_M = 0.034;
-const BUTTERCREAM_M = 0.0075;
+const SPONGE_M = 0.0133;
+const BUTTERCREAM_M = 0.005;
+const LAYER_PITCH_M = SPONGE_M + BUTTERCREAM_M;
+/** The jam spread on every other sponge layer before its buttercream. */
+const JAM_M = 0.002;
 const SPONGE_ROUGHNESS = 0.92;
 const BUTTERCREAM_ROUGHNESS = 0.5;
+/** Glossier than the cream, as jam's wet surface is. */
+const JAM_ROUGHNESS = 0.3;
 
 /**
  * A cut face's material for a plane masked by the stencil to where the cake's inside shows. Before
@@ -31,6 +39,7 @@ export class CutFaceMaterial extends THREE.MeshStandardMaterial {
       cakeBottomY: this.cakeBottomY,
       sponge: { value: new THREE.Color(SPONGE) },
       buttercream: { value: new THREE.Color(BUTTERCREAM) },
+      jam: { value: new THREE.Color(JAM) },
     };
     // The same source for every instance, so they share one shader program, with uniforms each their own.
     this.onBeforeCompile = (shader) => {
@@ -65,7 +74,13 @@ const FRAGMENT_DECLARATIONS = /* glsl */ `
 uniform float cakeBottomY;
 uniform vec3 sponge;
 uniform vec3 buttercream;
+uniform vec3 jam;
 varying vec3 vCakePosition;
+
+// The share of a pixel's footprint, footM wide around offsetM, that lies between loM and hiM.
+float coverCutFace(float offsetM, float footM, float loM, float hiM) {
+  return clamp((min(offsetM + footM * 0.5, hiM) - max(offsetM - footM * 0.5, loM)) / footM, 0.0, 1.0);
+}
 
 float hashCutFace(vec3 p) {
   p = fract(p * 0.3183099 + 0.1);
@@ -85,33 +100,44 @@ float noiseCutFace(vec3 p) {
 `;
 
 // Bands sit at whole multiples of the pitch after shifting the bottom by one sponge layer, each
-// band's thickness and height wandering a little so the layers look spread by hand. Detail finer
-// than about two pixels fades to its average, so a distant or grazing face does not shimmer.
+// band's thickness and height wandering a little so the layers look spread by hand, and even bands
+// carry jam just under their cream. Each pixel shows the share of its footprint the nearest band's
+// cream and jam cover, a box filter that keeps a band a few pixels wide crisp and blends one under a
+// pixel into a faint line rather than letting it shimmer. Only a footprint reaching the next band
+// fades to the layers' average. Texture finer than a pixel fades by the footprint on the face.
 const FRAGMENT_LAYERS = /* glsl */ `
 float cutFaceButtercream;
+float cutFaceJam;
 {
   const float pitchM = ${LAYER_PITCH_M.toFixed(4)};
   const float bandM = ${BUTTERCREAM_M.toFixed(4)};
+  const float jamM = ${JAM_M.toFixed(4)};
   vec3 p = vCakePosition;
-  float wanderM = (noiseCutFace(p * 40.0) - 0.5) * 0.004 + (noiseCutFace(p * 140.0) - 0.5) * 0.0008;
+  float faceFootM = length(fwidth(p));
+  float fineFade = 1.0 - smoothstep(0.0004, 0.0012, faceFootM);
+  float wanderM = (noiseCutFace(p * 40.0) - 0.5) * 0.002 + (noiseCutFace(p * 140.0) - 0.5) * 0.0004 * (1.0 - smoothstep(0.001, 0.003, faceFootM));
   float heightM = p.y - cakeBottomY - (pitchM - bandM / 2.0) + wanderM;
   float band = floor(heightM / pitchM + 0.5);
-  float fromBandM = abs(heightM - band * pitchM);
-  float halfBandM = bandM * (0.4 + 0.25 * hashCutFace(vec3(band, 3.7, 1.3)));
-  float pixelM = fwidth(heightM);
-  float edge = smoothstep(halfBandM - pixelM, halfBandM + pixelM, fromBandM);
-  float bandShare = 2.0 * halfBandM / pitchM;
-  cutFaceButtercream = mix(1.0 - edge, bandShare, smoothstep(0.3, 0.6, pixelM / halfBandM));
-  float crumbFade = 1.0 - smoothstep(0.0004, 0.0012, pixelM);
+  float fromBandM = heightM - band * pitchM;
+  float halfCreamM = bandM * (0.4 + 0.25 * hashCutFace(vec3(band, 3.7, 1.3)));
+  float jamThickM = jamM * (0.7 + 0.6 * hashCutFace(vec3(band, 5.1, 2.9))) * step(mod(band, 2.0), 0.5);
+  float footM = max(fwidth(heightM), 1e-6);
+  float farShare = smoothstep(0.4 * pitchM, 0.8 * pitchM, footM);
+  cutFaceButtercream = mix(coverCutFace(fromBandM, footM, -halfCreamM, halfCreamM), 2.0 * halfCreamM / pitchM, farShare);
+  cutFaceJam = mix(coverCutFace(fromBandM, footM, -halfCreamM - jamThickM, -halfCreamM), 0.5 * jamM / pitchM, farShare);
   float crumb = noiseCutFace(p * 900.0);
-  float pores = smoothstep(0.6, 0.85, crumb) * crumbFade;
+  float pores = smoothstep(0.6, 0.85, crumb) * fineFade;
   float bake = noiseCutFace(p * 25.0);
-  vec3 spongeColor = sponge * (0.92 + 0.12 * bake) * (1.0 - 0.28 * pores) * (1.0 + 0.06 * (crumb - 0.5) * crumbFade);
+  vec3 spongeColor = sponge * (0.92 + 0.12 * bake) * (1.0 - 0.28 * pores) * (1.0 + 0.06 * (crumb - 0.5) * fineFade);
   vec3 creamColor = buttercream * (0.97 + 0.03 * noiseCutFace(p * 300.0));
-  diffuseColor.rgb *= mix(spongeColor, creamColor, cutFaceButtercream);
+  // Darker at its edges, where it soaks into the sponge and lies thinner, and brighter in its depth.
+  float jamDepth = 1.0 - abs(fromBandM + halfCreamM + jamThickM * 0.5) / max(jamThickM * 0.5, 1e-6);
+  vec3 jamColor = jam * (0.75 + 0.4 * mix(0.5, clamp(jamDepth, 0.0, 1.0), fineFade));
+  float spongeShare = 1.0 - cutFaceButtercream - cutFaceJam;
+  diffuseColor.rgb *= spongeColor * spongeShare + creamColor * cutFaceButtercream + jamColor * cutFaceJam;
 }
 `;
 
 const FRAGMENT_ROUGHNESS = /* glsl */ `
-roughnessFactor = mix(${SPONGE_ROUGHNESS.toFixed(2)}, ${BUTTERCREAM_ROUGHNESS.toFixed(2)}, cutFaceButtercream);
+roughnessFactor = ${SPONGE_ROUGHNESS.toFixed(2)} * (1.0 - cutFaceButtercream - cutFaceJam) + ${BUTTERCREAM_ROUGHNESS.toFixed(2)} * cutFaceButtercream + ${JAM_ROUGHNESS.toFixed(2)} * cutFaceJam;
 `;

@@ -1,10 +1,10 @@
 import type { Profile } from "./net";
 
 /**
- * The player's name and standup order preference, remembered on this browser, with their seat's
- * token and when they last used the site, in any of its tabs. A page asks for the name and
- * preference again, filled in as last set, once the player has gone over an hour without mouse or
- * keyboard input on the site.
+ * The player's name, standup order preference, and whether they have a scrum update, remembered on
+ * this browser, with their seat's token and when they last used the site, in any of its tabs. A
+ * page asks for them again, filled in as last set, once the player has gone over an hour without
+ * mouse or keyboard input on the site.
  */
 
 const PROFILE_KEY = "cake-cut.profile";
@@ -26,7 +26,7 @@ export function loadProfile(): Profile | null {
   if (stored === null) return null;
   try {
     const parsed: unknown = JSON.parse(stored);
-    return isProfile(parsed) ? parsed : null;
+    return toProfile(parsed);
   } catch (error) {
     console.warn(`stored profile unreadable: ${error}`);
     return null;
@@ -85,10 +85,13 @@ function listenInput(onInput: () => void): void {
   for (const type of INPUT_EVENTS) window.addEventListener(type, onInput, { capture: true, passive: true });
 }
 
-function isProfile(value: unknown): value is Profile {
-  if (typeof value !== "object" || value === null) return false;
-  const { name, standupPreference } = value as Record<string, unknown>;
-  return typeof name === "string" && typeof standupPreference === "number" && standupPreference >= 0 && standupPreference <= 1;
+/** The stored `value` as a profile, or none when it is not one. A profile stored before the scrum update checkbox existed has an update, as the checkbox starts checked. */
+function toProfile(value: unknown): Profile | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { name, standupPreference, hasScrumUpdate = true } = value as Record<string, unknown>;
+  if (typeof name !== "string" || typeof hasScrumUpdate !== "boolean") return null;
+  if (typeof standupPreference !== "number" || standupPreference < 0 || standupPreference > 1) return null;
+  return { name, standupPreference, hasScrumUpdate };
 }
 
 /** The stored value, or none when it is missing or the browser refuses storage, as some private modes do. */

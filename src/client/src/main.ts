@@ -1,22 +1,26 @@
 import * as THREE from "three";
 import init, { Game, get_layout } from "@wasm/cake_wasm.js";
-import { CAKES, CAKE_KINDS, type CakeEntry, type CakeKind, buildCreditHtml, buildCreditsList, fetchCakeFile } from "./cakes";
+import { CAKES, CAKE_KINDS, type CakeEntry, type CakeKind, buildCreditsList, buildRoundCreditHtml, fetchCakeFile } from "./cakes";
 import { Controls } from "./controls";
 import { Countdown } from "./countdown";
 import { calcCutMotion } from "./cutMotion";
+import { IS_DEBUG_PAGE } from "./debug";
 import { FpsMeter } from "./fpsMeter";
 import { waitFrames } from "./frames";
 import { Judging } from "./judging";
+import { type Screen, setLoadingShown } from "./lobby";
 import { type JudgingMessage, type Member, type Net, RANDOM_CAKE, type ResultsMessage, type ResumeMessage, type ServerMessage } from "./net";
 import { buildLibrariesList } from "./libraries";
 import { Opponents } from "./opponents";
 import { Orbit } from "./orbit";
 import { watchActivity } from "./profile";
-import { OWN_TIMING, calcRevealFrame } from "./reveal";
+import { fetchPropAssets } from "./props";
+import { buildOwnScene, calcRevealFrame } from "./reveal";
 import { CakePreloader, freeRoundCake } from "./roundCakes";
-import { Scene } from "./scene";
-import { RoundWhistle, playChop, playLastCutWhistle } from "./sound";
-import { lobby, room, serverUrl } from "./startup";
+import { type PickKind, Scene } from "./scene";
+import { RoundSounds, playChop, playLastCutWhistle } from "./sound";
+import { formatScore } from "./standings";
+import { debugPanel, lobby, room, roundTimer, serverUrl } from "./startup";
 import { stepThrowawayWorld } from "./warmup";
 
 /**
@@ -28,11 +32,19 @@ const MAX_TICKS_PER_FRAME = 5;
 const CATCH_UP_BUDGET_MS = 40;
 /** Frames beyond the simulation's tick rate would show nothing new, so they are not drawn. */
 const MAX_FRAMES_PER_S = 60;
-/** The camera orbits this far above the stand's plate, among a cake set on it and the knife resting over it. */
-const ORBIT_ABOVE_STAND_M = 0.13;
+/** How long a round's cake that failed to load waits before the page tries it again. */
+const LOAD_RETRY_MS = 1000;
+/**
+ * Frames the scene's build waits for once the room is named: the first shows the room, after which
+ * a browser that never drew such a page spends up to 75 ms compiling its raster pipelines, which a
+ * WebGL context created meanwhile waits on.
+ */
+const ROOM_SHOWN_FRAMES = 3;
 
 await init();
 const layout = get_layout();
+// Started at once, so it is ready by the join.
+const propAssets = fetchPropAssets(layout);
 /** Development rounds and practice while waiting for an online round have no time limit. An online round takes the server's. */
 const offlineRoundTicks = import.meta.env.DEV || serverUrl ? undefined : layout.round_ticks;
 let roundTicks = offlineRoundTicks;
@@ -66,17 +78,20 @@ showCreditsForHash();
 // and then waits for the frame that shows the room, which the build would hold up for 0.1 s.
 if (room) {
   await room.firstCakeId;
-  await waitFrames(1);
+  await waitFrames(ROOM_SHOWN_FRAMES);
 }
-const scene = new Scene(canvas, layout);
+const assets = await propAssets;
+const scene = new Scene(canvas, layout, assets);
 const preloader = new CakePreloader(scene);
+// The second renderer gets a frame of its own, since a first visit's first WebGL context alone took up to 84 ms.
+if (lobby) await waitFrames(1);
 // Offline there are no opponents, so no second WebGL context.
-const opponents = lobby ? new Opponents(layout, layout.ticks_per_s) : null;
+const opponents = lobby ? new Opponents(layout, layout.ticks_per_s, assets.studio) : null;
 const judging = lobby ? new Judging(scene, layout) : null;
 const countdown = new Countdown(clock, layout.ticks_per_s);
-const whistle = new RoundWhistle();
-const orbit = new Orbit(scene.camera, new THREE.Vector3(0, layout.stand_top_y_m + ORBIT_ABOVE_STAND_M, 0));
-const fpsMeter = new URLSearchParams(location.search).has("fps") ? new FpsMeter() : null;
+const roundSounds = new RoundSounds();
+const orbit = new Orbit(scene.camera, layout.stand_top_y_m);
+const fpsMeter = IS_DEBUG_PAGE ? new FpsMeter() : null;
 /**
  * The cut in progress: when it started, the knife's travel, the lowering where the edge enters the
  * cake and the halves split open (none once they have, or for a cut that misses), and the result.
@@ -104,10 +119,17 @@ let myId = 0;
 let resumed: ResumeMessage | null = null;
 /** Whether the online round has players besides this page, whose tiles need its cake. */
 let hasOpponents = false;
+/** Whether the scene holds the online round's cake, so the round can show rather than "Loading...". */
+let isRoundCakeShown = false;
 /** The tiles' load of the round's cake from `game`, which keeps that game alive until it ends. */
 let opponentsCakeLoad: Promise<void> = Promise.resolve();
 /** Counts resyncs, so a rebuild a later `resume` overtook is dropped. */
 let resyncs = 0;
+/** When the online round began stepping ticks this page missed, until it has caught up with the round's clock. */
+let catchUpStartMs: number | null = null;
+/** The online round's players, and those whose cut this page has heard of, so it knows when the last has cut. */
+const roundPlayerIds = new Set<number>();
+const cutPlayerIds = new Set<number>();
 
 /** An online round the server started: this page's time at its tick 0. */
 interface StartedRound {
@@ -138,12 +160,88 @@ type Online =
   | { kind: "judging" };
 let online: Online = { kind: "practice" };
 const firstCake = room ? findCake(await room.firstCakeId) : pickCake();
-credit.replaceChildren(buildCreditHtml(firstCake));
+credit.replaceChildren(buildRoundCreditHtml(firstCake));
 const firstCakeFile = await fetchCakeFile(firstCake);
 let game = new Game(roundTicks, firstCakeFile);
 /** The cake `game` plays, so a spectator already showing the round's cake keeps it. */
 let gameCake = firstCake;
 const controls = new Controls(scene, orbit, layout, game);
+if (IS_DEBUG_PAGE) {
+  window.readKnife = readKnife;
+  window.readWorld = readWorld;
+  window.readHalves = () => scene.getHalfSlidesM();
+  window.readTiles = () => opponents?.readTiles() ?? [];
+  window.pickAt = pickAt;
+  window.readAnchors = readAnchors;
+}
+
+declare global {
+  interface Window {
+    /** On a `?debug` page, for step files: how far each cut half has slid apart, as the reveal labels them. */
+    readHalves?: () => number[];
+    /** On a `?debug` page, for step files: the knife's pose, whether `Cut!` would divide the cake, and the view's cursor. */
+    readKnife?: typeof readKnife;
+    /** On a `?debug` page, for step files: the world's tick and the cake's pose, to compare with the server's poses of it. */
+    readWorld?: typeof readWorld;
+    /** On a `?debug` page, for step files: what each opponent's tile shows this frame. */
+    readTiles?: () => ReturnType<Opponents["readTiles"]>;
+    /** On a `?debug` page, for step files: what a press at the client point would grab in the play view, if anything. */
+    pickAt?: typeof pickAt;
+    /** On a `?debug` page, for step files: where the cake, the plate, its rim, and the knife's edge are on screen, in client pixels. */
+    readAnchors?: typeof readAnchors;
+  }
+}
+
+/** Points on the plate's rim `readAnchors` gives, evenly round it from the +x axis. */
+const RIM_ANCHOR_LEN = 16;
+/** Points across the blade `readAnchors` gives, from one end of its span to the other, at each of two heights above its edge. */
+const BLADE_ANCHOR_LEN = 9;
+
+function readAnchors(): { cake: number[]; plate: number[]; rim: number[][]; knife: number[][] } {
+  const [x, y, z] = game.get_cake_pose();
+  const rim = Array.from({ length: RIM_ANCHOR_LEN }, (_, idx) => {
+    const angleRad = (2 * Math.PI * idx) / RIM_ANCHOR_LEN;
+    return projectToClient(layout.stand_radius_m * Math.cos(angleRad), layout.stand_top_y_m, layout.stand_radius_m * Math.sin(angleRad));
+  });
+  // The frame's edge and down are directions; the edge's lowest point hangs below the pivot by the lowering.
+  const frame = game.get_knife_frame();
+  const [edge, down] = [0, 3].map((start) => new THREE.Vector3().fromArray(frame, start));
+  const edgeMiddle = new THREE.Vector3(0, layout.pivot_y_m, 0).addScaledVector(down, game.get_knife_pose()[1]);
+  const knife = [0.5, 0.25].flatMap((backShare) =>
+    Array.from({ length: BLADE_ANCHOR_LEN }, (_, idx) => {
+      const alongM = layout.blade_half_span_m * 0.6 * ((2 * idx) / (BLADE_ANCHOR_LEN - 1) - 1);
+      const point = edgeMiddle.clone().addScaledVector(down, -layout.blade_back_m * backShare).addScaledVector(edge, alongM);
+      return projectToClient(point.x, point.y, point.z);
+    }),
+  );
+  return { cake: projectToClient(x, y, z), plate: projectToClient(0, layout.stand_top_y_m, 0), rim, knife };
+}
+
+function projectToClient(x: number, y: number, z: number): number[] {
+  const rect = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector3(x, y, z).project(scene.camera);
+  return [rect.left + ((ndc.x + 1) / 2) * rect.width, rect.top + ((1 - ndc.y) / 2) * rect.height];
+}
+
+/** The world's tick, the cake's pose, and the stand's angle, and in an online round the page's own round clock's start and tick. */
+function readWorld(): { tick: number; cakePose: number[]; standRad: number; startMs: number | null; clockTick: number | null } {
+  const started = online.kind === "playing" || online.kind === "cut" ? online.started : null;
+  const clockTick = started && calcClockTick(started, performance.now());
+  return { tick: game.get_tick(), cakePose: [...game.get_cake_pose()], standRad: game.get_stand_angle_rad(), startMs: started?.startMs ?? null, clockTick };
+}
+
+function pickAt(clientX: number, clientY: number): PickKind | null {
+  const rect = canvas.getBoundingClientRect();
+  const pointer = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(pointer, scene.camera);
+  return scene.pick(raycaster)?.kind ?? null;
+}
+
+function readKnife(): { tiltRad: number; loweredM: number; isCutThrough: boolean; cursor: string } {
+  const [tiltRad, lowerM, restM] = game.get_knife_pose();
+  return { tiltRad, loweredM: lowerM - restM, isCutThrough: game.is_cut_through(), cursor: canvas.style.cursor };
+}
 
 /** The picker's group for one kind of cake, its cakes by name. */
 function buildPickerGroup(kind: CakeKind): HTMLOptGroupElement {
@@ -180,9 +278,10 @@ async function startRound(cake = pickCake(), ticks = offlineRoundTicks): Promise
   game.free();
   game = next.game;
   gameCake = cake;
-  credit.replaceChildren(buildCreditHtml(cake));
+  credit.replaceChildren(buildRoundCreditHtml(cake));
   controls.reset(game);
   scene.resetCake(next.loaded);
+  orbit.resetForCake(scene.getCakeHeightM());
   cutting = null;
   result.hidden = true;
   return true;
@@ -192,8 +291,8 @@ function startCut(split: Float64Array, nowMs: number): void {
   const toLowerM = game.calc_cut_lower_m();
   const isCutThrough = game.is_cut_through();
   const splitLowerM = isCutThrough ? Math.min(game.calc_cake_touch_lower_m(), toLowerM) : null;
-  const halvesM3 = isCutThrough ? [split[0], split[1]] : [split[0] + split[1]];
-  const halvesG = halvesM3.map((m3) => m3 * layout.density_g_per_m3);
+  // A cut that missed skips the count.
+  const halvesG = isCutThrough ? [split[0], split[1]].map((m3) => m3 * layout.density_g_per_m3) : [];
   cutting = { startMs: nowMs, fromLowerM: game.get_knife_pose()[1], toLowerM, splitLowerM, split, halvesG, isOnline: online.kind === "playing", revealStartMs: null };
   playChop("own");
   // Offline, this player's cut is the round's last.
@@ -201,6 +300,20 @@ function startCut(split: Float64Array, nowMs: number): void {
   if (online.kind !== "playing") return;
   console.info(`cut at tick ${game.get_tick()}: score ${split[2]}`);
   online = { kind: "cut", started: online.started };
+  blowIfLastCut();
+}
+
+/**
+ * Blows the whistle once this page has cut and heard of every other round player's cut, so the
+ * last cut's whistle comes as this player sees it rather than a round trip later with `play_over`,
+ * which blows it otherwise, for a spectator or a page still playing.
+ */
+function blowIfLastCut(): void {
+  if (online.kind !== "cut") return;
+  for (const id of roundPlayerIds) {
+    if (id !== myId && !cutPlayerIds.has(id)) return;
+  }
+  roundSounds.blowForLastCut();
 }
 
 /**
@@ -217,11 +330,12 @@ function animateCut(nowMs: number): void {
   }
   if (!isDone || cut.isOnline || !scene.hasHalfRests()) return;
   cut.revealStartMs ??= nowMs;
-  const frame = calcRevealFrame((nowMs - cut.revealStartMs) / 1000, OWN_TIMING, cut.halvesG);
-  scene.setHalfPartShare(frame.partShare);
-  scene.showHalfGrams(frame.shownG);
+  const frame = calcRevealFrame((nowMs - cut.revealStartMs) / 1000, buildOwnScene(cut.halvesG), cut.halvesG);
+  scene.setHalfPartShares(frame.partShares);
+  if (frame.shownG.length > 0) scene.showHalfGrams(frame.shownG);
   if (!frame.isCounted || !result.hidden) return;
-  score.textContent = `${cut.split[2].toFixed(1)}%`;
+  score.textContent = formatScore(cut.split[2], cut.halvesG.length === 0);
+  score.classList.toggle("is-miss", cut.halvesG.length === 0);
   result.hidden = false;
 }
 
@@ -253,10 +367,14 @@ function stepOnline(playing: Online & { kind: "playing" }, nowMs: number): void 
   const budgetEndMs = performance.now() + CATCH_UP_BUDGET_MS;
   while (!cutting && game.get_tick() < clockTick) {
     const isMissed = game.get_tick() < clockTick - MAX_TICKS_PER_FRAME;
+    if (isMissed) catchUpStartMs ??= nowMs;
     if (isMissed && performance.now() >= budgetEndMs) return;
     if (playing.replayed && stepReplayed(playing, playing.replayed, nowMs)) continue;
     stepOnlineTick(playing, isMissed ? playing.heldInput : controls.stepInput(game), nowMs);
   }
+  if (catchUpStartMs === null) return;
+  console.info(`caught up to the round's clock at tick ${game.get_tick()} in ${Math.round(nowMs - catchUpStartMs)} ms`);
+  catchUpStartMs = null;
 }
 
 /** Steps one tick of the round with `input`, which the server hears of. */
@@ -350,6 +468,12 @@ function isCatchingUp(nowMs: number): boolean {
   return online.kind === "playing" && game.get_tick() < calcClockTick(online.started, nowMs) - MAX_TICKS_PER_FRAME;
 }
 
+/** Whether a drag now moves the cake, knife, or stand: offline until the cut, online in a round this page plays until its cut. */
+function isInputLive(): boolean {
+  if (cutting) return false;
+  return online.kind === "playing" || (online.kind === "practice" && !lobby);
+}
+
 /** Starts the cut the world makes itself at the round's last tick, once it has. */
 function startTimeoutCut(nowMs: number): void {
   const split = game.find_split();
@@ -366,15 +490,16 @@ function onServerMessage(message: ServerMessage): void {
       break;
     case "pick":
       lobby!.showPick(message);
-      // Built hidden with the server's round length, which the round's own message repeats.
-      preloader.preload(findCake(message.cake), layout.round_ticks);
+      // Built hidden with the round's length, which the round's own message repeats.
+      preloader.preload(findCake(message.cake), message.round_ticks);
       break;
     case "claim_refused":
       lobby!.showClaimRefused();
       break;
     case "round":
       resumed = null;
-      whistle.open(message.round_ticks * tickMs);
+      roundTimer?.start(performance.now());
+      roundSounds.open(message.round_ticks * tickMs);
       onRound(findCake(message.cake), message.round_ticks, message.players);
       break;
     case "resume":
@@ -385,27 +510,36 @@ function onServerMessage(message: ServerMessage): void {
     case "start": {
       const startMs = performance.now() - message.elapsed_ms;
       onStart({ startMs });
-      whistle.start(startMs);
+      roundSounds.start(startMs);
       break;
     }
-    case "sit_out":
+    case "still_loading":
       opponents!.removeOpponents(message.players);
-      if (message.players.includes(myId)) sitOut();
+      break;
+    case "now_playing":
+      roundPlayerIds.add(message.player.id);
+      if (message.player.id !== myId) opponents!.addOpponent(message.player);
       break;
     case "cut":
       opponents!.addCut(message.id, message.tick, message.pose, message.cut_lower_m);
       judging!.addCut(message);
+      cutPlayerIds.add(message.id);
+      blowIfLastCut();
       break;
     case "play_over":
-      whistle.blowForLastCut();
+      roundSounds.blowForLastCut();
       break;
     case "judging":
       // A page that joined after the last cut heard no whistle and should not hear one now.
-      whistle.close();
+      roundSounds.close();
       showJudging(message);
       break;
     case "results":
+      roundTimer?.stop(performance.now());
       showResults(message);
+      break;
+    case "debug":
+      debugPanel?.showSettings(message);
       break;
     case "desync":
       console.warn(`server replay differs at tick ${message.tick}`);
@@ -422,6 +556,7 @@ function findCake(id: string): CakeEntry {
 
 function onRoom(room: Extract<ServerMessage, { type: "room" }>): void {
   lobby!.showRoom(room, myId);
+  debugPanel?.showHost(room.host === myId);
   opponents!.syncMembers(room.members);
   if (room.phase !== "lobby") return;
   opponents!.close();
@@ -431,10 +566,14 @@ function onRoom(room: Extract<ServerMessage, { type: "room" }>): void {
 
 /** Shows the round's other players beside this page's own game, and plays the round if this page is in it, or spectates it. */
 function onRound(cake: CakeEntry, ticks: number, players: readonly Member[]): void {
+  roundPlayerIds.clear();
+  cutPlayerIds.clear();
+  for (const player of players) roundPlayerIds.add(player.id);
   const others = players.filter((player) => player.id !== myId);
   opponents!.open(others);
   judging!.open();
   hasOpponents = others.length > 0;
+  isRoundCakeShown = false;
   // Until the round's cake loads, the stand stands empty rather than showing an earlier cake or its credit.
   if (!isShowingUntouched(cake)) {
     scene.hideCake();
@@ -460,11 +599,17 @@ async function spectate(cake: CakeEntry, ticks: number): Promise<void> {
   online = { kind: "spectating", started: null, ticks };
   try {
     if (!isShowingUntouched(cake) && !(await startRound(cake, ticks))) return;
-    judging!.setCakeReady();
+    setRoundCakeShown();
     await loadOpponentsCake();
   } catch (error) {
     console.error(`loading cake ${cake.id} to spectate failed:`, error);
   }
+}
+
+/** Notes that the scene holds the online round's cake, whole, for the round and its judging to show. */
+function setRoundCakeShown(): void {
+  isRoundCakeShown = true;
+  judging!.setCakeReady();
 }
 
 /** Gives the opponents' tiles the round's cake, unless the round has no one else to show. */
@@ -479,44 +624,30 @@ function isLoading(): boolean {
   return online.kind === "loading";
 }
 
-/** Whether this page spectates the round, read fresh as `isLoading` is. */
-function isSpectating(): boolean {
-  return online.kind === "spectating";
-}
-
 /**
- * Spectates the round this page was in, since its cake had not loaded when the round started. A
- * cake still loading shows once it has, as `joinRound` finishes.
- */
-function sitOut(): void {
-  if (online.kind === "loading") online = { kind: "spectating", started: online.started, ticks: online.ticks };
-  else if (online.kind === "waiting") online = { kind: "spectating", started: null, ticks: roundTicks! };
-  else return;
-  lobby!.showSatOut();
-}
-
-/**
- * Loads an online round's cake, then plays it if the server started it meanwhile, or waits for the
- * start. A cake that fails to load returns the page to practice, so the lobby shows again.
+ * Loads an online round's cake, then plays it if the server started it meanwhile, with the time
+ * left, or waits for the start. A load that fails is tried again until the round ends, since the
+ * round never waits for this page and its world idles until the page plays.
  */
 async function joinRound(cake: CakeEntry, ticks: number): Promise<void> {
   online = { kind: "loading", started: null, ticks };
-  let isLatest: boolean;
-  try {
-    isLatest = await startRound(cake, ticks);
-  } catch (error) {
-    console.error(`loading cake ${cake.id} failed:`, error);
-    if (isLoading()) online = { kind: "practice" };
-    return;
+  let isLatest = false;
+  while (isLoading()) {
+    try {
+      isLatest = await startRound(cake, ticks);
+      break;
+    } catch (error) {
+      console.error(`loading cake ${cake.id} failed, trying again:`, error);
+      await new Promise((resolve) => setTimeout(resolve, LOAD_RETRY_MS));
+    }
   }
   if (!isLatest) return;
-  judging!.setCakeReady();
-  // Sat out for loading too slowly, the page still shows the round's cake to spectate it.
-  if (isSpectating()) void loadOpponentsCake();
+  setRoundCakeShown();
   if (!isLoading()) return;
   getNet().sendReady();
   void loadOpponentsCake();
   const { started } = online;
+  if (started) console.info(`loaded the cake at the round's tick ${calcClockTick(started, performance.now())}, playing the time left`);
   online = started ? startPlaying(started) : { kind: "waiting" };
 }
 
@@ -524,6 +655,7 @@ async function joinRound(cake: CakeEntry, ticks: number): Promise<void> {
 function startPlaying(started: StartedRound): Online {
   const replayed = resumed && expandReplayed(resumed);
   resumed = null;
+  catchUpStartMs = null;
   return { kind: "playing", started, heldInput: controls.buildIdleInput(game), replayed, stepped: [] };
 }
 
@@ -540,7 +672,7 @@ function onStart(started: StartedRound): void {
  * sees it there, as the server scored it.
  */
 function showJudging(message: JudgingMessage): void {
-  console.info(`judging: ${JSON.stringify(message.order)}, ${message.scene_ms} ms a scene, ${message.elapsed_ms} ms in`);
+  console.info(`judging: ${JSON.stringify(message.order)}, counting ${JSON.stringify(message.count_ms)} ms, ${message.elapsed_ms} ms in`);
   opponents!.close();
   cutting = null;
   result.hidden = true;
@@ -560,18 +692,37 @@ function showResults(results: ResultsMessage): void {
 
 /**
  * Shows the lobby whenever this page is not in a round, as the rules alone while it spectates,
- * Again for offline practice, `Cut!` to anyone but a spectator, and the countdown and the cake's
- * credit only when the lobby does not cover them.
+ * "Loading..." while the round it is in or watches has no cake yet, Again for offline practice,
+ * `Cut!` to anyone but a spectator, and the countdown and the cake's credit only with the round.
  */
 function syncOverlays(nowMs: number): void {
-  const isLobbyShown = lobby !== null && online.kind === "practice";
-  lobby?.setVisible(isLobbyShown || online.kind === "spectating");
-  setHidden(cakeMenu, isLobbyShown);
+  const screen = findScreen();
+  if (lobby) lobby.setScreen(screen);
+  else setLoadingShown(screen === "loading");
+  const isRoundShown = screen === "round" || screen === "rules";
+  setHidden(cakeMenu, !isRoundShown);
   setHidden(again, lobby !== null || online.kind !== "practice");
   setHidden(cutButton, online.kind === "spectating" || online.kind === "judging");
-  const ticks = isLobbyShown ? null : findCountdownTicks(nowMs);
+  const ticks = isRoundShown ? findCountdownTicks(nowMs) : null;
   setHidden(clock, ticks === null);
   if (ticks) countdown.show(Math.max(ticks.left, 0), ticks.total);
+}
+
+/** What the page shows for where it is in the room. Offline, it shows its practice round from the first frame. */
+function findScreen(): Screen {
+  if (!lobby) return "round";
+  switch (online.kind) {
+    case "practice":
+      return lobby.hasRoomToShow() ? "lobby" : "loading";
+    case "loading":
+      return "loading";
+    case "spectating":
+      return isRoundCakeShown ? "rules" : "loading";
+    case "judging":
+      return isRoundCakeShown ? "round" : "loading";
+    default:
+      return "round";
+  }
 }
 
 /**
@@ -597,8 +748,8 @@ function getNet(): Net {
   return room!.getNet()!;
 }
 
+/** Leaves the room behind once the connection is lost, which `Room` shows as a fatal error. */
 function onLost(): void {
-  lobby!.showDisconnected();
   leaveRoom();
 }
 
@@ -615,7 +766,7 @@ function ageMessage(message: ServerMessage, heldMs: number): ServerMessage {
 function leaveRoom(): void {
   opponents!.close();
   judging!.stop();
-  whistle.close();
+  roundSounds.close();
   preloader.drop();
   online = { kind: "practice" };
 }
@@ -646,14 +797,17 @@ function onFrame(nowMs: number): void {
     scene.setViewShiftPx(opponents?.getViewShiftPx() ?? 0);
   }
   cutButton.disabled = cutting !== null || !game.is_cut_through() || isCatchingUp(nowMs);
+  scene.setHighlight(isInputLive() ? controls.findHighlightKind() : null);
   syncOverlays(nowMs);
   scene.render();
   const net = room?.getNet();
   if (net) opponents!.render(nowMs, net.poses);
   fpsMeter?.record(nowMs, elapsedMs);
+  roundTimer?.update(nowMs);
 }
 
 scene.resetCake(await scene.loadCake(game));
+orbit.resetForCake(scene.getCakeHeightM());
 // Drawing first would compile every shader in one frame, which held the lobby 150-200 ms.
 await scene.compile();
 cutButton.addEventListener("click", () => {

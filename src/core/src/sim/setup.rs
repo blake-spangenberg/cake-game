@@ -7,6 +7,7 @@ use rapier3d::glamx::DVec3;
 use rapier3d::prelude::*;
 
 use super::mass::calc_mass_properties;
+use super::squash::HullFrame;
 use super::{CAKE_FRICTION, FREE_ANGULAR_DAMPING, FREE_LINEAR_DAMPING};
 use crate::cakes::CakeModel;
 use crate::cut::DENSITY_G_PER_M3;
@@ -28,6 +29,8 @@ pub struct Cake {
     hull_shapes: Vec<SharedShape>,
     /// The hulls as one shape, for sweeping the cake along the hand's moves.
     pub(super) shape: SharedShape,
+    /// The hulls' corners and edges, for finding the patch a resting cake squashes onto.
+    pub(super) hull_frame: HullFrame,
 }
 
 impl Cake {
@@ -46,7 +49,8 @@ impl Cake {
             .map(|hull| SharedShape::convex_hull(hull).expect("a cake's hulls are not degenerate"))
             .collect();
         let shape = SharedShape::compound(hull_shapes.iter().map(|hull| (Pose::IDENTITY, hull.clone())).collect());
-        Self { model, tree, width_range_m, mass, hull_shapes, shape }
+        let hull_frame = HullFrame::build(&hull_shapes);
+        Self { model, tree, width_range_m, mass, hull_shapes, shape, hull_frame }
     }
 
     #[must_use]

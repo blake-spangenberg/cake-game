@@ -5,7 +5,7 @@ const REFRESH_MS = 250;
 
 /**
  * A corner readout of the frames drawn per second and the longest interval between two drawn
- * frames over the past `WINDOW_MS`, both rounded to whole numbers. Made for `?fps` pages only.
+ * frames over the past `WINDOW_MS`, both rounded to whole numbers. Made for `?debug` pages only.
  */
 export class FpsMeter {
   private readonly readout = document.createElement("div");

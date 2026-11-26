@@ -4,7 +4,12 @@ use cake_server::protocol::PlayerId;
 use cake_server::standup::{Chooser, calc_standup_order, order_choosers};
 
 const fn chooser(id: PlayerId, preference: f64) -> Chooser {
-    Chooser { id, preference }
+    Chooser { id, preference: Some(preference) }
+}
+
+/// Someone who unchecked `I have a scrum update`.
+const fn without_update(id: PlayerId) -> Chooser {
+    Chooser { id, preference: None }
 }
 
 /// Reverses each tied group, an order a reader can predict in place of a random one.
@@ -31,6 +36,18 @@ fn last_to_choose_takes_the_last_slot_left_whatever_their_preference() {
 fn everyone_wanting_to_go_first_goes_in_choosing_order() {
     let choosers = [chooser(7, 0.0), chooser(3, 0.0), chooser(9, 0.0)];
     assert_eq!(calc_standup_order(&choosers), [7, 3, 9]);
+}
+
+#[test]
+fn choosers_without_a_scrum_update_get_no_slot_and_take_none_from_the_others() {
+    // Three slots, not five: 1 wants slot 2 of 0-2, the last, and 4 wants slot 0.
+    let choosers = [chooser(1, 1.0), without_update(2), chooser(3, 0.5), without_update(5), chooser(4, 0.0)];
+    assert_eq!(calc_standup_order(&choosers), [4, 3, 1]);
+}
+
+#[test]
+fn no_one_with_an_update_leaves_the_order_empty() {
+    assert_eq!(calc_standup_order(&[without_update(1), without_update(2)]), Vec::<PlayerId>::new());
 }
 
 #[test]

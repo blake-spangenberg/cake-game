@@ -95,6 +95,11 @@ pub struct Replay {
     resynced_tick: u32,
     /// Whether the page's world has parted from this one since the last resync.
     is_parted: bool,
+    /// The fewest ticks behind the round's clock any of the page's inputs arrived, none before one has.
+    input_lag_ticks: Option<u32>,
+    /// The round's clock tick by which the page had loaded the cake, after which it sends an input
+    /// every tick, none before it has.
+    ready_clock_tick: Option<u32>,
 }
 
 /// A run of ticks stepped with the same input, as a reopened page replays them.
@@ -118,7 +123,35 @@ impl Replay {
             pending_notes: Vec::new(),
             resynced_tick: 0,
             is_parted: false,
+            input_lag_ticks: None,
+            ready_clock_tick: None,
         }
+    }
+
+    /// Notes that the page had loaded the cake by the round's clock tick `clock_tick`, unless it was noted earlier.
+    pub fn ensure_ready_noted(&mut self, clock_tick: u32) {
+        self.ready_clock_tick.get_or_insert(clock_tick);
+    }
+
+    /// The round's clock tick by which the page had loaded the cake, if it has.
+    #[must_use]
+    pub const fn find_ready_clock_tick(&self) -> Option<u32> {
+        self.ready_clock_tick
+    }
+
+    /// Notes that the page's input stamped for `tick` arrived with the round's clock at `clock_tick`.
+    pub fn note_input_arrival(&mut self, tick: u32, clock_tick: u32) {
+        let lag_ticks = clock_tick.saturating_sub(tick);
+        self.input_lag_ticks = Some(self.input_lag_ticks.map_or(lag_ticks, |known| known.min(lag_ticks)));
+    }
+
+    /// How many ticks behind the round's clock the page's inputs arrive when nothing holds them
+    /// up: the fewest any arrived by, none before one has. A page keeps to the round's clock from
+    /// when `start` reached it and its inputs take as long again to come back, so this is its
+    /// round trip, which stalls and bursts only lengthen.
+    #[must_use]
+    pub const fn find_input_lag_ticks(&self) -> Option<u32> {
+        self.input_lag_ticks
     }
 
     /// Whether the page's world has parted from this one since its last resync, and the page is

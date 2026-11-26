@@ -1,9 +1,9 @@
 /**
- * Where each half of a cut cake comes to rest once the halves part, chosen so every half ends on
- * something: presentation only, it never touches the weighed halves. A half resting on the plate
- * or the table slides level away from the cut, no farther than keeps what it rests on under it
- * and keeps it out of the stand. A half resting on neither, held up by the other half's cut face,
- * slides down along the cut plane, against the standing blade, until it lands.
+ * Where each half of a cut cake comes to rest once the halves part: presentation only, it never
+ * touches the weighed halves. The halves only slide level across the table, never up or down. A
+ * half resting on the plate or the table slides away from the cut, no farther than keeps what it
+ * rests on under it and keeps it out of the stand. A half resting on neither, held up by the other
+ * half's cut face, stays against the standing blade, and the other half parts the whole gap.
  */
 import * as THREE from "three";
 
@@ -37,11 +37,6 @@ const REST_TOLERANCE_M = 0.006;
 /** How far inside the plate's rim a resting point must stay, clear of the rim's beads. */
 const RIM_MARGIN_M = 0.008;
 const TABLE_MARGIN_M = 0.01;
-/** Step of the coarse search for where a falling half lands, refined by `LAND_FINE_STEPS`. */
-const LAND_STEP_M = 0.01;
-const LAND_FINE_STEPS = 5;
-/** The farthest a half slides down the cut plane looking for a landing, more than any cake stands tall. */
-const MAX_LAND_M = 0.4;
 /** Points a slice visits, as flattened coordinates, small enough that a slice takes about a millisecond before the code warms up. */
 const SLICE_COORDS = 3 * 2048;
 
@@ -68,12 +63,7 @@ export function* calcHalfRests(positions: Float32Array, pose: THREE.Matrix4, piv
   }
   let slidesM = shareSlidesM(yield* calcCapsM("inside"), PARTED_GAP_M);
   if (slidesM[0] + slidesM[1] < MIN_PARTED_GAP_M) slidesM = shareSlidesM(yield* calcCapsM("overhang"), MIN_PARTED_GAP_M);
-  const downhill = new THREE.Vector3(0, -1, 0).projectOnPlane(normal).normalize();
-  const rests = [0, 1].map((idx) => dirs[idx].clone().multiplyScalar(Math.max(slidesM[idx], minSlideM)));
-  for (const idx of [0, 1]) {
-    if (!isResting[idx]) rests[idx].addScaledVector(downhill, yield* calcLandM(halves[idx], rests[idx], downhill, supports));
-  }
-  return rests;
+  return [0, 1].map((idx) => dirs[idx].clone().multiplyScalar(Math.max(slidesM[idx], minSlideM)));
 }
 
 /** `positions` placed by `pose`, split by which side of the plane through `pivot` with `normal` they lie on, `+normal` first. */
@@ -200,30 +190,4 @@ function calcStandEntryM(x: number, y: number, z: number, dir: THREE.Vector3, su
     entryM = Math.min(entryM, -along - Math.sqrt(disc));
   }
   return entryM;
-}
-
-/** How far `half`, moved by `offset`, slides along `downhill` before any point of it would sink into the plate, the table, or the stand. */
-function* calcLandM(half: Float32Array, offset: THREE.Vector3, downhill: THREE.Vector3, supports: Supports): SlicedJob<number> {
-  let landM = 0;
-  for (let stepM = LAND_STEP_M; stepM >= LAND_STEP_M / LAND_FINE_STEPS; stepM /= LAND_FINE_STEPS) {
-    while (landM + stepM <= MAX_LAND_M && !(yield* isSunk(half, offset.clone().addScaledVector(downhill, landM + stepM), supports))) landM += stepM;
-  }
-  return landM;
-}
-
-function* isSunk(half: Float32Array, offset: THREE.Vector3, supports: Supports): SlicedJob<boolean> {
-  const parts = supports.standParts;
-  for (let i = 0; i < half.length; i += 3) {
-    if (i % SLICE_COORDS === 0) yield;
-    const y = half[i + 1] + offset.y;
-    // Nothing a point can sink into reaches above the plate's top.
-    if (y >= supports.plateTopYM) continue;
-    const x = half[i] + offset.x;
-    const z = half[i + 2] + offset.z;
-    if (calcHeightAboveSupport(x, y, z, supports) < -REST_TOLERANCE_M) return true;
-    for (let j = 0; j < parts.length; j += 3) {
-      if (y > parts[j + 1] && y < parts[j + 2] - REST_TOLERANCE_M && x * x + z * z < parts[j] * parts[j]) return true;
-    }
-  }
-  return false;
 }

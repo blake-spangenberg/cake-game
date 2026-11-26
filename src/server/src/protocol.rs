@@ -29,13 +29,19 @@ pub const POSE_FLAG_CUT: u32 = 1 << 1;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// The first message on a connection, which makes it a player in the room, with their standup
-    /// order preference from 0 (first to give their update) to 1 (last), and the `seat` token an
-    /// earlier connection of theirs was welcomed with, to reopen into that seat.
+    /// order preference from 0 (first to give their update) to 1 (last), whether they have a scrum
+    /// update at all, without which they get no standup slot, and the `seat` token an earlier
+    /// connection of theirs was welcomed with, to reopen into that seat. A page opened with
+    /// `?debug` says so, which lets it send the debug messages and hear the room's debug settings.
     Join {
         name: String,
         standup_preference: f64,
+        #[serde(default = "has_scrum_update_by_default")]
+        has_scrum_update: bool,
         #[serde(default)]
         seat: Option<String>,
+        #[serde(default)]
+        is_debug: bool,
     },
     /// Makes the sender host, given the host password, in the lobby or the results.
     ClaimHost { password: String },
@@ -51,6 +57,19 @@ pub enum ClientMessage {
     Cut { tick: u32 },
     /// [`World::calc_hash`] at `tick`, in decimal, since JSON numbers cannot hold every `u64`.
     Hash { tick: u32, hash: String },
+    /// From a `?debug` page: adds a simulated player to the room, which plays every round it is in.
+    AddBot,
+    /// From a `?debug` page: removes the newest bot, which a round in progress keeps as a leaver.
+    RemoveBot,
+    /// From a `?debug` page: sets the length of the rounds started from now on, in seconds.
+    SetRoundLength { round_s: u32 },
+    /// From a `?debug` page: sets how long each message between a bot and the room takes, each way.
+    SetBotLatency { latency_ms: u32 },
+}
+
+/// A join that leaves out `has_scrum_update` has one, as the join dialog's checkbox starts checked.
+const fn has_scrum_update_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -64,17 +83,25 @@ pub enum ServerMessage {
     Resume { runs: Vec<Run>, cut_tick: Option<u32> },
     /// Who is in the room, sent whenever that, the host, or the phase changes.
     Room { phase: PhaseName, host: Option<PlayerId>, members: Vec<Member> },
-    /// The next round's cake, which every page in the lobby downloads without showing it, and
-    /// whether the host picked Random, sent on joining the lobby and whenever it changes.
-    Pick { cake: String, is_random: bool },
+    /// The next round's cake and length, which every page in the lobby builds without showing
+    /// it, and whether the host picked Random, sent on joining the lobby and whenever it changes.
+    Pick { cake: String, is_random: bool, round_ticks: u32 },
     /// A host claim with the wrong password.
     ClaimRefused,
-    /// A round on `cake` for `players`, named as the round started, so a page joining after one left
-    /// can still label them: each loads it and answers [`ClientMessage::Ready`]. Anyone else spectates.
+    /// A join refused because a player whose page is connected has the same name, ignoring case
+    /// and surrounding spaces. The server closes the connection after it.
+    NameTaken,
+    /// A round on `cake` for `players`, named as the round started or as they joined it, so a page
+    /// joining after one left can still label them: each loads it and answers
+    /// [`ClientMessage::Ready`]. Anyone else spectates.
     Round { cake: String, round_ticks: u32, players: Vec<Member> },
-    /// The round's `players` whose page had not loaded the cake when it started, sent just before
-    /// [`ServerMessage::Start`]: they leave the round and spectate it.
-    SitOut { players: Vec<PlayerId> },
+    /// The round's `players` whose page has yet to load the cake, sent just before
+    /// [`ServerMessage::Start`] and to a page joining mid-round. They play once loaded, with the
+    /// time left, and their views show from [`ServerMessage::NowPlaying`] on.
+    StillLoading { players: Vec<PlayerId> },
+    /// A round `player` who loaded the cake after the round started, or joined it in play, now
+    /// plays it, so every page shows their view.
+    NowPlaying { player: Member },
     /// Tick 0 of the round, `elapsed_ms` ago for a spectator joining late.
     Start { elapsed_ms: u64 },
     /// A player cut, with the frozen pose and lowerings the cut animation needs, but no score.
@@ -83,9 +110,18 @@ pub enum ServerMessage {
     /// opponent views have had time to play the last cut.
     PlayOver,
     /// The judging reveal, which every page shows in step from `elapsed_ms` ago: each round player
-    /// in the random `order`, `scene_ms` each, judged by their standing. Every player's cut, ranked,
-    /// with the pose of each in its [`ServerMessage::Cut`].
-    Judging { order: Vec<PlayerId>, scene_ms: u64, elapsed_ms: u64, standings: Vec<Standing> },
+    /// in `order`, every miss first, judged by their standing, in a scene apiece of `hold_ms` with
+    /// the halves together, then the gram count, taking the matching `count_ms`, then `after_ms`
+    /// with the score up. Every player's cut, ranked, with the pose of each in its
+    /// [`ServerMessage::Cut`].
+    Judging {
+        order: Vec<PlayerId>,
+        hold_ms: u64,
+        count_ms: Vec<u64>,
+        after_ms: u64,
+        elapsed_ms: u64,
+        standings: Vec<Standing>,
+    },
     /// Every player's cut ranked, once the judging reveal ends, and the order everyone in the room,
     /// spectators included, gives their standup update in.
     Results { standings: Vec<Standing>, standup: Vec<Member> },
@@ -93,6 +129,9 @@ pub enum ServerMessage {
     Desync { tick: u32 },
     /// A message the room refused.
     Error { message: String },
+    /// The room's debug settings, to `?debug` pages only, on joining and whenever one changes: the
+    /// next round's length, how many bots are in the room, and their latency each way.
+    Debug { round_s: u32, bots: u32, bot_latency_ms: u32 },
 }
 
 /// `ticks` stepped with the same `input`.

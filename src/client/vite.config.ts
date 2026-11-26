@@ -16,8 +16,11 @@ const outDir = path.join(buildDir, "client");
 const precompressedCacheDir = path.join(buildDir, "precompressed");
 /** The tracked brotli packs of the cakes, already compressed at brotli's best, which a cake whose bytes match reuses. */
 const packedCakesDir = path.join(repoRoot, "assets", "cakes");
-/** What compresses: text, the WASM, and the cakes, whose meshes shrink by about half. Images and fonts come compressed. */
-const COMPRESSED_EXTENSIONS = new Set([".html", ".js", ".css", ".wasm", ".cake", ".json", ".svg"]);
+/**
+ * What compresses: text, the WASM, the cakes, whose meshes shrink by about half, and the knife's
+ * studio reflections (`.bin`), a tenth. Images and fonts come compressed.
+ */
+const COMPRESSED_EXTENSIONS = new Set([".html", ".js", ".css", ".wasm", ".cake", ".bin", ".json", ".svg"]);
 /** A variant must save this share of its file's size to be worth a decode. */
 const MIN_SAVED_SHARE = 0.05;
 const BROTLI_WINDOW_BITS = 24;

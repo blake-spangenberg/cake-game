@@ -3,8 +3,9 @@ import { type Game, type Layout, get_blade_outline, get_stand_parts } from "@was
 import { CutFaceMaterial } from "./cutFace";
 import { waitFrames } from "./frames";
 import { HalfLabels } from "./halfLabels";
+import { type Highlight, addHighlight } from "./highlight";
 import { type SlicedJob, type Supports, calcHalfRests } from "./halfRest";
-import { FROSTING, type ShadowArea, addLights, buildCakeGeometry, buildKnife, buildStand, buildTable, calcKnifeNormal, decodeCakeTexture, placeKnife } from "./props";
+import { FROSTING, type PropAssets, type ShadowArea, addLights, buildCakeGeometry, buildKnife, buildStand, buildTable, calcKnifeNormal, decodeCakeTexture, placeKnife } from "./props";
 
 /** What a click grabbed: the cake, any part of the knife (blade or handles), or the cake stand. */
 export type PickKind = "cake" | "knife" | "stand";
@@ -84,8 +85,8 @@ export class Scene {
   private readonly stand: THREE.Group;
   /** The point every cut plane passes through. */
   private readonly pivot: THREE.Vector3;
-  /** How far the halves have parted, from 0 in the cut to 1 at rest, as `setHalfPartShare` sets it. */
-  private partShare = 0;
+  /** How far each half has parted, from 0 in the cut to 1 at rest, as `setHalfPartShares` sets them. */
+  private partShares: readonly number[] = [];
   /** The search for where the halves come to rest, run a slice per frame from `showHalves` until it sets each half's `toM`. */
   private halfRestsJob: SlicedJob<THREE.Vector3[]> | null = null;
   private readonly halves: Half[];
@@ -94,6 +95,14 @@ export class Scene {
   /** The materials skinned with the round's texture: the whole cake's, then each half's frosting. */
   private readonly frostings: THREE.MeshStandardMaterial[];
   private readonly halfLabels: HalfLabels;
+  /**
+   * What a pick's ray tests: what a click can grab, and the table, which hides a cake fallen below
+   * it. Leaving out the hidden halves, which each test every triangle of the cake around the stand
+   * three times over, keeps a pick over the stand from taking 20-70 ms.
+   */
+  private readonly pickables: THREE.Object3D[];
+  /** The highlight of every material each kind of object a click can grab draws with. */
+  private readonly highlights: Record<PickKind, Highlight[]>;
   /** Where each label in `halfLabels` points before the halves slide, once `showHalfGrams` has found them. */
   private labelTops: (THREE.Vector3 | null)[] | null = null;
   private cakeLoaded: LoadedCake = { positions: new Float32Array(), geometry: new THREE.BufferGeometry(), texture: null };
@@ -103,10 +112,12 @@ export class Scene {
    */
   private framesUntilWarm = WARM_DELAY_FRAMES;
   private viewShiftPx = 0;
+  private isViewRaised = true;
 
   constructor(
     canvas: HTMLCanvasElement,
     private readonly layout: Layout,
+    assets: PropAssets,
   ) {
     this.pivot = new THREE.Vector3(0, layout.pivot_y_m, 0);
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true, powerPreference: "high-performance" });
@@ -116,10 +127,11 @@ export class Scene {
     this.scene.background = new THREE.Color(0x1d1b19);
     this.halfLabels = new HalfLabels(canvas, HALF_SIDES.length);
     addLights(this.scene, SHADOW);
-    this.scene.add(buildTable(layout, this.renderer.capabilities.getMaxAnisotropy()));
+    const table = buildTable(layout, assets.tableWood, this.renderer.capabilities.getMaxAnisotropy());
+    this.scene.add(table);
     this.stand = buildStand(layout);
     this.stand.userData.pick = "stand";
-    this.knife.add(buildKnife(layout), buildKnifeGrip());
+    this.knife.add(buildKnife(layout, assets.studio), buildKnifeGrip());
     this.knife.userData.pick = "knife";
     const whole = new THREE.Mesh(this.cakeLoaded.geometry, new THREE.MeshStandardMaterial({ color: FROSTING }));
     whole.castShadow = true;
@@ -129,17 +141,26 @@ export class Scene {
     this.halves = HALF_SIDES.map((side, idx) => this.addHalf(side, idx));
     this.cakeMeshes = [whole, ...this.halves.flatMap((half) => half.group.children as THREE.Mesh[])];
     this.frostings = [whole.material, ...this.halves.map((half) => half.frosting)];
+    this.highlights = { cake: [addHighlight(whole.material)], knife: addGroupHighlights(this.knife), stand: addGroupHighlights(this.stand) };
     this.knife.matrixAutoUpdate = false;
     this.scene.add(this.cake, this.knife, this.stand);
+    this.pickables = [table, this.cake, this.knife, this.stand];
   }
 
   /** The kind of object the ray first meets, and where, or none for the room around them. */
   pick(raycaster: THREE.Raycaster): { kind: PickKind; point: THREE.Vector3 } | null {
-    const hit = raycaster.intersectObjects(this.scene.children, true).find((candidate) => candidate.object.visible);
+    const hit = raycaster.intersectObjects(this.pickables, true).find((candidate) => candidate.object.visible);
     for (let object: THREE.Object3D | null = hit?.object ?? null; object; object = object.parent) {
       if (object.userData.pick) return { kind: object.userData.pick, point: hit!.point };
     }
     return null;
+  }
+
+  /** Faintly highlights the whole cake, the knife, or the stand, or none of them. */
+  setHighlight(kind: PickKind | null): void {
+    for (const [highlightKind, highlights] of Object.entries(this.highlights)) {
+      for (const highlight of highlights) highlight.value = highlightKind === kind ? 1 : 0;
+    }
   }
 
   /**
@@ -172,6 +193,12 @@ export class Scene {
     for (const mesh of this.cakeMeshes) mesh.geometry = cake.geometry;
     this.setSkin(cake.texture);
     this.showWholeCake();
+  }
+
+  /** How tall the round's cake stands as served, the pose its model is baked in. */
+  getCakeHeightM(): number {
+    const box = this.cakeLoaded.geometry.boundingBox!;
+    return box.max.y - box.min.y;
   }
 
   /** Shows the cake whole again, without labels, for `sync` to pose. */
@@ -274,7 +301,7 @@ export class Scene {
 
   /**
    * Swaps the whole cake for its two halves along the knife's plane, apart by just the blade's
-   * thickness until `setHalfPartShare` parts them, so the blade shows in the cut as it plunges.
+   * thickness until `setHalfPartShares` parts them, so the blade shows in the cut as it plunges.
    */
   showHalves(game: Game): void {
     const normal = calcKnifeNormal(game.get_knife_pose()[0]);
@@ -297,7 +324,7 @@ export class Scene {
   }
 
   /**
-   * Shows `cut` as it was made, for the judging reveal to part with `setHalfPartShare`: the
+   * Shows `cut` as it was made, for the judging reveal to part with `setHalfPartShares`: the
    * stand, the cake in halves still together, or whole for a cut that missed, and the knife
    * plunged in it, with `prepared` from `prepareCut`. The labels show once `showHalfGrams` asks.
    */
@@ -318,7 +345,7 @@ export class Scene {
     // Their own drawing compiles whatever a pending warm-up would have.
     this.framesUntilWarm = 0;
     const level = normal.clone().setY(0).normalize();
-    this.partShare = 0;
+    this.partShares = [];
     for (const half of this.halves) {
       half.normal.copy(normal).multiplyScalar(half.side);
       half.fromM.copy(level).multiplyScalar(half.side * this.calcBladeClearSlideM(normal));
@@ -339,11 +366,17 @@ export class Scene {
   }
 
   /**
-   * Parts the halves from `showHalves` or `stageCut` by `share`, from 0 together to 1 where each
-   * comes to rest, as `calcHalfRests` chose, which `hasHalfRests` tells has been found.
+   * Parts each half from `showHalves` or `stageCut` by `shares[i]`, in the order `showHalfGrams`
+   * labels them, from 0 together to 1 where it comes to rest, as `calcHalfRests` chose, which
+   * `hasHalfRests` tells has been found.
    */
-  setHalfPartShare(share: number): void {
-    this.partShare = share;
+  setHalfPartShares(shares: readonly number[]): void {
+    this.partShares = [...shares];
+  }
+
+  /** How far each shown half has slid from where it was cut, in the order `showHalfGrams` labels them, none while the cake shows whole. */
+  getHalfSlidesM(): number[] {
+    return this.halves.filter((half) => half.cap.visible).map((half) => half.group.position.distanceTo(half.fromM));
   }
 
   hasHalfRests(): boolean {
@@ -390,9 +423,9 @@ export class Scene {
   render(): void {
     if (this.framesUntilWarm > 0 && --this.framesUntilWarm === 0) this.warmHalves();
     this.stepHalfRests();
-    for (const half of this.halves) {
+    for (const [idx, half] of this.halves.entries()) {
       if (!half.cap.visible) continue;
-      half.group.position.lerpVectors(half.fromM, half.toM, this.partShare);
+      half.group.position.lerpVectors(half.fromM, half.toM, this.partShares[idx] ?? 0);
       const cutPoint = this.pivot.clone().add(half.group.position);
       half.clip.setFromNormalAndCoplanarPoint(half.normal, cutPoint);
       half.clip.projectPoint(this.cake.position.clone().add(half.group.position), half.cap.position);
@@ -426,6 +459,16 @@ export class Scene {
     this.fitCamera();
   }
 
+  /**
+   * Raises the view's center by `VIEW_RAISE_SHARE` for play, or centers it for the judging, whose
+   * camera aims at the judged cake rather than the table and has no `Cut!` button to clear.
+   */
+  setViewRaised(isRaised: boolean): void {
+    if (isRaised === this.isViewRaised) return;
+    this.isViewRaised = isRaised;
+    this.fitCamera();
+  }
+
   private fitCanvas(): void {
     const canvas = this.renderer.domElement;
     if (canvas.width === canvas.clientWidth && canvas.height === canvas.clientHeight) return;
@@ -436,7 +479,7 @@ export class Scene {
   /**
    * Fits the camera to the canvas as a window onto a view wider by twice the shift and taller by
    * twice the raise, at the larger view's bottom right corner, so the table sits left and up of
-   * the canvas's middle.
+   * the canvas's middle, or at its vertical middle while the view is not raised.
    */
   private fitCamera(): void {
     const { width, height } = this.renderer.domElement;
@@ -446,7 +489,7 @@ export class Scene {
     // The larger view spreads the field of view over its full height, so zooming out by as much
     // keeps the window's field of view, and with it how far a drag moves, as without the raise.
     this.camera.zoom = height / fullHeightPx;
-    this.camera.setViewOffset(width + 2 * shiftPx, fullHeightPx, 2 * shiftPx, 2 * raisePx, width, height);
+    this.camera.setViewOffset(width + 2 * shiftPx, fullHeightPx, 2 * shiftPx, this.isViewRaised ? 2 * raisePx : raisePx, width, height);
   }
 }
 
@@ -459,6 +502,15 @@ function buildKnifeGrip(): THREE.Mesh {
   shape.closePath();
   const geometry = new THREE.ExtrudeGeometry(shape, { depth: KNIFE_GRIP_THICKNESS_M, bevelEnabled: false }).translate(0, 0, -KNIFE_GRIP_THICKNESS_M / 2);
   return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ visible: false }));
+}
+
+/** Highlights for every lit material `group` draws with, each once. */
+function addGroupHighlights(group: THREE.Object3D): Highlight[] {
+  const materials = new Set<THREE.MeshStandardMaterial>();
+  group.traverse((object) => {
+    if (object instanceof THREE.Mesh && object.material instanceof THREE.MeshStandardMaterial) materials.add(object.material);
+  });
+  return [...materials].map(addHighlight);
 }
 
 /** Counts, per pixel, the half's surfaces behind the cut: nonzero exactly where the cut face shows. */

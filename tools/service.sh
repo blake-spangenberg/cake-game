@@ -97,7 +97,7 @@ stop() {
 }
 
 [[ $# -ge 1 ]] || usage
-[[ $(uname -s) == Linux ]] || { echo "Error: the server runs as a service only on Linux; elsewhere make serve runs it in the foreground" >&2; exit 1; }
+[[ $(uname -s) == Linux ]] || { echo "Error: the server runs as a service only on Linux; elsewhere make start runs it in the foreground" >&2; exit 1; }
 # cron and other sessions without a login leave this unset, and systemctl --user needs it.
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 command=$1
