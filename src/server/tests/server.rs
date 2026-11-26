@@ -91,6 +91,7 @@ async fn start_server() -> String {
         deadline_grace_ms: BURST_GRACE_MS,
         judging_delay_ms: 0,
         judging_hold_ms: 0,
+        judging_min_count_ms: 0,
         judging_max_count_ms: 0,
         judging_after_ms: 0,
         judging_tail_ms: 0,

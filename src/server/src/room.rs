@@ -80,8 +80,11 @@ pub struct RoomConfig {
     /// How long each judging scene shows a player's halves together, their counters at 0, before
     /// the counting starts.
     pub judging_hold_ms: u64,
-    /// How long a perfect cut's gram count takes in its judging scene, the longest any takes: a
-    /// worse cut's is shorter by the square of its score's share of a perfect one.
+    /// The floor a cut's gram count in its judging scene falls toward as its score falls. At most
+    /// [`RoomConfig::judging_max_count_ms`].
+    pub judging_min_count_ms: u64,
+    /// How long a perfect cut's gram count takes, the longest any takes: a worse cut's is shorter,
+    /// toward the floor, by the square of its score's share of a perfect one.
     pub judging_max_count_ms: u64,
     /// How long each judging scene goes on after its count ends and the score shows, before the next.
     pub judging_after_ms: u64,
@@ -101,6 +104,7 @@ impl Default for RoomConfig {
             seat_hold_ms: 60 * 60 * 1000,
             judging_delay_ms: 3_000,
             judging_hold_ms: 500,
+            judging_min_count_ms: 1_500,
             judging_max_count_ms: 3_000,
             judging_after_ms: 500,
             judging_tail_ms: 1_500,
@@ -933,8 +937,7 @@ impl Room {
         }
         let judged = build_judging_order(&standings);
         let order: Vec<PlayerId> = judged.iter().map(|standing| standing.id).collect();
-        let count_ms: Vec<u64> =
-            judged.iter().map(|standing| calc_count_ms(standing, self.config.judging_max_count_ms)).collect();
+        let count_ms: Vec<u64> = judged.iter().map(|standing| calc_count_ms(standing, &self.config)).collect();
         let scenes: Vec<String> =
             judged.iter().zip(&count_ms).map(|(standing, ms)| format!("{} ({ms} ms)", standing.name)).collect();
         eprintln!("judging order: {}, results in {} ms", scenes.join(", "), self.calc_judging_ms(&count_ms));
@@ -1335,21 +1338,22 @@ fn build_judging_order(standings: &[Standing]) -> Vec<&Standing> {
     order
 }
 
-/// How long the judging counts `standing`'s grams: `max_count_ms` for a perfect cut, shorter by the
-/// square of the score's share of a perfect one, so a near-perfect cut's count lingers and a poor
-/// one's is quick, and none for a miss.
+/// How long the judging counts `standing`'s grams: from the shortest count toward the longest, a
+/// perfect cut's, by the square of the score's share of a perfect one, so a near-perfect cut's
+/// count lingers and a poor one's is quicker, and none for a miss.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     reason = "a count of a few seconds in ms, from a share in 0-1"
 )]
-fn calc_count_ms(standing: &Standing, max_count_ms: u64) -> u64 {
+fn calc_count_ms(standing: &Standing, config: &RoomConfig) -> u64 {
     if is_miss(standing) {
         return 0;
     }
     let share = standing.score / MAX_SCORE;
-    (max_count_ms as f64 * share * share).round() as u64
+    let span_ms = config.judging_max_count_ms - config.judging_min_count_ms;
+    config.judging_min_count_ms + (span_ms as f64 * share * share).round() as u64
 }
 
 /// Whether `standing`'s knife missed the cake, which the core's cut scores as the whole cake above

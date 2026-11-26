@@ -331,7 +331,7 @@ function animateCut(nowMs: number): void {
   if (!isDone || cut.isOnline || !scene.hasHalfRests()) return;
   cut.revealStartMs ??= nowMs;
   const frame = calcRevealFrame((nowMs - cut.revealStartMs) / 1000, buildOwnScene(cut.halvesG), cut.halvesG);
-  scene.setHalfPartShares(frame.partShares);
+  scene.setHalfPartShare(frame.partShare);
   if (frame.shownG.length > 0) scene.showHalfGrams(frame.shownG);
   if (!frame.isCounted || !result.hidden) return;
   score.textContent = formatScore(cut.split[2], cut.halvesG.length === 0);

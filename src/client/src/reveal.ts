@@ -1,38 +1,36 @@
 /**
  * The timing of a cut's reveal, shared by the online judging and the offline practice's own cut:
- * the halves together, then each sliding apart in place while a gram counter over it counts up
- * from 0, each half stopping as its counter does, then the score the instant the larger half's
- * counter stops. A cut that missed the cake skips the count.
+ * the halves together, then both sliding apart in place at a constant velocity while a gram
+ * counter over each counts up from 0. The slides start with the counters and end with the larger
+ * half's counter, as the score shows. A cut that missed the cake skips the count.
  */
 
 /**
- * One cut's reveal, in seconds from its start: the counters wait at 0 for `holdS` while the halves
- * start sliding apart, then count for `countS`, ending with the score. Online, the server sets both
- * for every page, as `src/server`'s `calc_count_ms` does; a miss counts for none.
+ * One cut's reveal, in seconds from its start: the halves stay together and the counters wait at 0
+ * for `holdS`, then the halves part as the counters count for `countS`, ending with the score.
+ * Online, the server sets both for every page, as `src/server`'s `calc_count_ms` does; a miss
+ * counts for none.
  */
 export interface RevealScene {
   holdS: number;
   countS: number;
 }
 
-/** The offline practice's own cut, revealed once the knife has settled in it: a shorter count than the judged one's 3 s at most. */
+/** The offline practice's own cut, revealed once the knife has settled in it: shorter counts than the judged ones' 1.5 to 3 s. */
 const OWN_HOLD_S = 0.3;
+const OWN_MIN_COUNT_S = 1.2;
 const OWN_MAX_COUNT_S = 2.4;
 /** The count's ease, in grams (see `Wheel`): its last gram takes about `countS / (1 + EASE_G)`, 0.4 s of a perfect cut's 3 s count. */
 const EASE_G = 6.5;
-/** The time constant of a slide's spring-like start: it is at 63% of its top speed this long after the reveal starts. */
-const SLIDE_RAMP_S = 0.12;
-/** How much of its speed a slide sheds by its stop, steadily, from a peak near its start. */
-const SLIDE_BRAKE = 0.75;
 /** Absorbs the float error of a count landing exactly on a whole gram, far under a gram. */
 const WHOLE_GRAM_SLACK_G = 1e-9;
 
 /**
- * A reveal at one moment: how far each half has slid apart, from 0 to 1, each counter's grams,
- * both in the order of the halves' grams given (none for a miss), and whether the counting has ended.
+ * A reveal at one moment: how far both halves have slid apart, from 0 to 1, each counter's grams in
+ * the order of the halves' grams given (none for a miss), and whether the counting has ended.
  */
 export interface RevealFrame {
-  partShares: number[];
+  partShare: number;
   shownG: number[];
   isCounted: boolean;
 }
@@ -51,30 +49,32 @@ interface Wheel {
 
 /**
  * The offline practice's reveal of halves of `halvesG` grams, or of a miss, `[]`, as the server
- * paces a judged one: its count is longest for a perfect cut and shorter by the square of the
- * score's share of a perfect one.
+ * paces a judged one: its count is longest for a perfect cut and shorter, toward a floor, by the
+ * square of the score's share of a perfect one.
  */
 export function buildOwnScene(halvesG: readonly number[]): RevealScene {
   if (halvesG.length === 0) return { holdS: OWN_HOLD_S, countS: 0 };
   const totalG = halvesG.reduce((sum, g) => sum + g, 0);
   const scoreShare = (halvesG.length * Math.min(...halvesG)) / totalG;
-  return { holdS: OWN_HOLD_S, countS: OWN_MAX_COUNT_S * scoreShare * scoreShare };
+  return { holdS: OWN_HOLD_S, countS: OWN_MIN_COUNT_S + (OWN_MAX_COUNT_S - OWN_MIN_COUNT_S) * scoreShare * scoreShare };
 }
 
 /**
  * `scene` `elapsedS` in for halves of `halvesG` grams, or for a cut that missed, `[]`. Every
  * counter shows the same count until it reaches its own half's weight, so a perfect cut stops both
- * at once and a bad one counts the larger half on alone. Each half slides from the reveal's start
- * until its own counter stops, braking into the stop.
+ * at once and a bad one counts the larger half on alone. Both halves slide until the count ends,
+ * the smaller one's counter stopping first.
  */
 export function calcRevealFrame(elapsedS: number, scene: RevealScene, halvesG: readonly number[]): RevealFrame {
-  if (halvesG.length === 0) return { partShares: [], shownG: [], isCounted: elapsedS >= calcCountedS(scene) };
+  const isCounted = elapsedS >= calcCountedS(scene);
+  if (halvesG.length === 0) return { partShare: 0, shownG: [], isCounted };
   const wheel = buildWheel(scene, halvesG);
   const countG = Math.floor(calcCountG(wheel, elapsedS - scene.holdS) + WHOLE_GRAM_SLACK_G);
   return {
-    partShares: halvesG.map((g) => calcSlideShare(elapsedS, calcReachedS(scene, wheel, Math.round(g)))),
+    // Checked first, since the division can round a hair short of 1 on the frame the count ends.
+    partShare: isCounted ? 1 : Math.max(elapsedS - scene.holdS, 0) / scene.countS,
     shownG: halvesG.map((g) => Math.min(countG, Math.round(g))),
-    isCounted: elapsedS >= calcCountedS(scene),
+    isCounted,
   };
 }
 
@@ -103,7 +103,7 @@ export function calcCountTicksS(scene: RevealScene, halvesG: readonly number[], 
   return ticksS.reverse();
 }
 
-/** When `wheel`'s count reaches `g` grams in `scene`, in seconds from its start, where a half of `g` grams stops sliding. */
+/** When `wheel`'s count reaches `g` grams in `scene`, in seconds from its start. */
 function calcReachedS(scene: RevealScene, wheel: Wheel, g: number): number {
   return scene.holdS + wheel.countS - calcTimeToGoS(wheel, wheel.endG - g);
 }
@@ -125,24 +125,4 @@ function calcCountG(wheel: Wheel, countS: number): number {
   const toGoS = wheel.countS - countS;
   if (toGoS <= 0) return wheel.endG;
   return wheel.endG - (EASE_G * toGoS) / (wheel.limitS - toGoS);
-}
-
-/**
- * How far a half has slid `elapsedS` into the reveal, its slide ending at `stopS`, as its counter
- * stops. Its speed `(1 - e^(-s / SLIDE_RAMP_S)) * (1 - SLIDE_BRAKE * s / stopS)` rises like a
- * released spring, then brakes steadily into a stop still at a quarter of its peak speed, so the
- * stop shows. A half's counter can stop within a frame or two of the count's start (the smaller
- * half of an uneven cut of a heavy cake), so the slides start with the reveal, `holdS` before the
- * counters, and never last less than that.
- */
-function calcSlideShare(elapsedS: number, stopS: number): number {
-  if (elapsedS <= 0) return 0;
-  if (elapsedS >= stopS) return 1;
-  return calcSlideDistance(elapsedS / stopS, SLIDE_RAMP_S / stopS) / calcSlideDistance(1, SLIDE_RAMP_S / stopS);
-}
-
-/** The integral of the slide's speed over `x` of its duration, the ramp's time constant being `rampShare` of the duration. */
-function calcSlideDistance(x: number, rampShare: number): number {
-  const decay = Math.exp(-x / rampShare);
-  return x - (SLIDE_BRAKE * x * x) / 2 - rampShare * (1 - decay) + SLIDE_BRAKE * (rampShare * rampShare * (1 - decay) - rampShare * x * decay);
 }

@@ -110,6 +110,7 @@ const fn build_config(max_lead_ticks: u32, judging_delay_ms: u64) -> RoomConfig 
         seat_hold_ms: SEAT_HOLD_MS,
         judging_delay_ms,
         judging_hold_ms: 0,
+        judging_min_count_ms: 0,
         judging_max_count_ms: 0,
         judging_after_ms: 0,
         judging_tail_ms: 0,
@@ -134,6 +135,7 @@ fn create_room_of_two_cakes() -> Room {
         round_ticks: ROUND_TICKS,
         judging_delay_ms: 0,
         judging_hold_ms: 0,
+        judging_min_count_ms: 0,
         judging_max_count_ms: 0,
         judging_after_ms: 0,
         judging_tail_ms: 0,
@@ -468,16 +470,19 @@ fn judge_a_sliver_and_a_miss(config: RoomConfig) -> (Room, Client) {
 }
 
 #[test]
-fn judging_counts_a_cut_for_the_longest_count_times_its_score_share_squared_and_a_miss_for_none() {
-    let config =
-        RoomConfig { judging_max_count_ms: SLIVER_COUNTING_MAX_COUNT_MS, ..build_config(WHOLE_ROUND_LEAD_TICKS, 0) };
+fn judging_counts_a_cut_from_the_floor_toward_the_longest_count_by_its_score_share_squared_and_a_miss_for_none() {
+    let config = RoomConfig {
+        judging_min_count_ms: 1_000_000,
+        judging_max_count_ms: SLIVER_COUNTING_MAX_COUNT_MS,
+        ..build_config(WHOLE_ROUND_LEAD_TICKS, 0)
+    };
     let (_room, mut alice) = judge_a_sliver_and_a_miss(config);
 
     let (order, (_, count_ms, _), _, standings) = find_judging(&alice.take_messages()).unwrap();
     assert_eq!(find_standing(&standings, 1).score, 0.030_176_947_593_552_05);
     assert_eq!(order, [2, 1]);
-    // 1e12 ms times (0.0003017694759355205)^2.
-    assert_eq!(count_ms, [0, 91_065]);
+    // 1e6 ms, plus the 1e12 - 1e6 ms above it times (0.0003017694759355205)^2.
+    assert_eq!(count_ms, [0, 1_091_065]);
 }
 
 #[test]

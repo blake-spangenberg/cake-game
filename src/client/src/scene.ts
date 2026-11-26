@@ -85,8 +85,8 @@ export class Scene {
   private readonly stand: THREE.Group;
   /** The point every cut plane passes through. */
   private readonly pivot: THREE.Vector3;
-  /** How far each half has parted, from 0 in the cut to 1 at rest, as `setHalfPartShares` sets them. */
-  private partShares: readonly number[] = [];
+  /** How far the halves have parted, from 0 in the cut to 1 at rest, as `setHalfPartShare` sets it. */
+  private partShare = 0;
   /** The search for where the halves come to rest, run a slice per frame from `showHalves` until it sets each half's `toM`. */
   private halfRestsJob: SlicedJob<THREE.Vector3[]> | null = null;
   private readonly halves: Half[];
@@ -301,7 +301,7 @@ export class Scene {
 
   /**
    * Swaps the whole cake for its two halves along the knife's plane, apart by just the blade's
-   * thickness until `setHalfPartShares` parts them, so the blade shows in the cut as it plunges.
+   * thickness until `setHalfPartShare` parts them, so the blade shows in the cut as it plunges.
    */
   showHalves(game: Game): void {
     const normal = calcKnifeNormal(game.get_knife_pose()[0]);
@@ -324,7 +324,7 @@ export class Scene {
   }
 
   /**
-   * Shows `cut` as it was made, for the judging reveal to part with `setHalfPartShares`: the
+   * Shows `cut` as it was made, for the judging reveal to part with `setHalfPartShare`: the
    * stand, the cake in halves still together, or whole for a cut that missed, and the knife
    * plunged in it, with `prepared` from `prepareCut`. The labels show once `showHalfGrams` asks.
    */
@@ -345,7 +345,7 @@ export class Scene {
     // Their own drawing compiles whatever a pending warm-up would have.
     this.framesUntilWarm = 0;
     const level = normal.clone().setY(0).normalize();
-    this.partShares = [];
+    this.partShare = 0;
     for (const half of this.halves) {
       half.normal.copy(normal).multiplyScalar(half.side);
       half.fromM.copy(level).multiplyScalar(half.side * this.calcBladeClearSlideM(normal));
@@ -366,12 +366,11 @@ export class Scene {
   }
 
   /**
-   * Parts each half from `showHalves` or `stageCut` by `shares[i]`, in the order `showHalfGrams`
-   * labels them, from 0 together to 1 where it comes to rest, as `calcHalfRests` chose, which
-   * `hasHalfRests` tells has been found.
+   * Parts the halves from `showHalves` or `stageCut` by `share`, from 0 together to 1 where each
+   * comes to rest, as `calcHalfRests` chose, which `hasHalfRests` tells has been found.
    */
-  setHalfPartShares(shares: readonly number[]): void {
-    this.partShares = [...shares];
+  setHalfPartShare(share: number): void {
+    this.partShare = share;
   }
 
   /** How far each shown half has slid from where it was cut, in the order `showHalfGrams` labels them, none while the cake shows whole. */
@@ -423,9 +422,9 @@ export class Scene {
   render(): void {
     if (this.framesUntilWarm > 0 && --this.framesUntilWarm === 0) this.warmHalves();
     this.stepHalfRests();
-    for (const [idx, half] of this.halves.entries()) {
+    for (const half of this.halves) {
       if (!half.cap.visible) continue;
-      half.group.position.lerpVectors(half.fromM, half.toM, this.partShares[idx] ?? 0);
+      half.group.position.lerpVectors(half.fromM, half.toM, this.partShare);
       const cutPoint = this.pivot.clone().add(half.group.position);
       half.clip.setFromNormalAndCoplanarPoint(half.normal, cutPoint);
       half.clip.projectPoint(this.cake.position.clone().add(half.group.position), half.cap.position);

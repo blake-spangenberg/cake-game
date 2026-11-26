@@ -64,6 +64,7 @@ fn main() {
     // The judging reveal steps no world, so timing stops where it starts.
     let config = RoomConfig {
         judging_hold_ms: 0,
+        judging_min_count_ms: 0,
         judging_max_count_ms: 0,
         judging_after_ms: 0,
         judging_tail_ms: 0,

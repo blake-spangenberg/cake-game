@@ -143,7 +143,7 @@ export class Judging {
     }
     if (reveal.stagedIdx !== sceneIdx) this.stageScene(reveal, sceneIdx, prep.cut, prepared);
     const frame = calcRevealFrame(sceneS, timing, this.calcHalvesG(standing));
-    this.scene.setHalfPartShares(frame.partShares);
+    this.scene.setHalfPartShare(frame.partShare);
     if (frame.shownG.length > 0) this.scene.showHalfGrams(frame.shownG);
     this.scoreLabel.hidden = !frame.isCounted;
     this.aimCamera(prepared.bounds, elapsedMs / 1000);
