@@ -1,10 +1,9 @@
 import * as THREE from "three";
-import { type Game, type Layout, get_blade_outline, get_stand_parts } from "@wasm/cake_wasm.js";
+import { type Game, type Layout, get_blade_outline } from "@wasm/cake_wasm.js";
 import { CutFaceMaterial } from "./cutFace";
 import { waitFrames } from "./frames";
 import { HalfLabels } from "./halfLabels";
 import { type Highlight, addHighlight } from "./highlight";
-import { type SlicedJob, type Supports, calcHalfRests } from "./halfRest";
 import { FROSTING, type PropAssets, type ShadowArea, addLights, buildCakeGeometry, buildKnife, buildStand, buildTable, calcKnifeNormal, decodeCakeTexture, placeKnife } from "./props";
 
 /** What a click grabbed: the cake, any part of the knife (blade or handles), or the cake stand. */
@@ -18,8 +17,11 @@ const SHADOW: ShadowArea = { extentM: 1.05, mapPx: 2048 };
 const BLADE_CLEARANCE_M = 0.0005;
 /** Vertices `boxHalves` visits per slice, about a millisecond's work. */
 const BOX_SLICE_VERTICES = 8192;
-/** How long a frame spends finding where the halves come to rest, which takes several before the code warms up. */
-const REST_SLICE_MS = 2;
+/**
+ * How far each half ends from where the knife cut it, level across the table and never up or down,
+ * even where that hangs it past the plate or runs it into the stand.
+ */
+const PARTED_SLIDE_M = 0.075;
 /** Side of the plane drawn over a cut face, centered on the cake, larger than any cake's section. */
 const CAP_SIZE_M = 1;
 /** Thickness of the invisible copy of the blade that takes its clicks, since the blade seen edge-on is a hairline. */
@@ -68,9 +70,11 @@ export interface StagedCut {
   isCutThrough: boolean;
 }
 
-/** What `Scene.prepareCut` finds for `Scene.stageCut`: each half's rest, where its label points (the whole cake's first, for a miss), and the whole cake's world bounds. */
+/** A search that runs a slice of its work per `next()`, so no frame takes all of it, and returns its result once done. */
+export type SlicedJob<T> = Generator<void, T, void>;
+
+/** What `Scene.prepareCut` finds for `Scene.stageCut`: where each half's label points (the whole cake's first, for a miss), and the whole cake's world bounds. */
 export interface PreparedCut {
-  rests: THREE.Vector3[];
   labelTops: (THREE.Vector3 | null)[];
   bounds: THREE.Box3;
 }
@@ -87,8 +91,6 @@ export class Scene {
   private readonly pivot: THREE.Vector3;
   /** How far the halves have parted, from 0 in the cut to 1 at rest, as `setHalfPartShare` sets it. */
   private partShare = 0;
-  /** The search for where the halves come to rest, run a slice per frame from `showHalves` until it sets each half's `toM`. */
-  private halfRestsJob: SlicedJob<THREE.Vector3[]> | null = null;
   private readonly halves: Half[];
   /** The whole cake's mesh, then each half's frosting and stencil counters, all drawing the round's one geometry. */
   private readonly cakeMeshes: THREE.Mesh[];
@@ -206,7 +208,6 @@ export class Scene {
     this.cake.visible = true;
     this.hideHalves();
     this.labelTops = null;
-    this.halfRestsJob = null;
   }
 
   /** Hides the cake, whole or in halves, until the next `resetCake`, leaving the stand empty. */
@@ -304,23 +305,17 @@ export class Scene {
    * thickness until `setHalfPartShare` parts them, so the blade shows in the cut as it plunges.
    */
   showHalves(game: Game): void {
-    const normal = calcKnifeNormal(game.get_knife_pose()[0]);
-    this.splitHalves(normal);
-    const pose = new THREE.Matrix4().compose(this.cake.position, this.cake.quaternion, new THREE.Vector3(1, 1, 1));
-    this.halfRestsJob = calcHalfRests(this.cakeLoaded.positions, pose, this.pivot, normal, this.calcBladeClearSlideM(normal), this.calcSupports());
+    this.splitHalves(calcKnifeNormal(game.get_knife_pose()[0]));
   }
 
   /**
    * Finds what `stageCut` needs to show `cut` on the round's cake without a long frame: where its
-   * halves come to rest, where their labels point, and the whole cake's bounds, a slice per `next()`.
+   * halves' labels point and the whole cake's bounds, a slice per `next()`.
    */
   *prepareCut(cut: StagedCut): SlicedJob<PreparedCut> {
-    const pose = calcCakePose(cut.cakePose);
     const normal = cut.isCutThrough ? calcKnifeNormal(cut.tiltRad) : null;
-    const positions = this.cakeLoaded.positions;
-    const boxes = yield* boxHalves(positions, pose, this.pivot, normal);
-    const rests = normal ? yield* calcHalfRests(positions, pose, this.pivot, normal, this.calcBladeClearSlideM(normal), this.calcSupports()) : HALF_SIDES.map(() => new THREE.Vector3());
-    return { rests, labelTops: boxes.map(findBoxTop), bounds: boxes[0].clone().union(boxes[1]) };
+    const boxes = yield* boxHalves(this.cakeLoaded.positions, calcCakePose(cut.cakePose), this.pivot, normal);
+    return { labelTops: boxes.map(findBoxTop), bounds: boxes[0].clone().union(boxes[1]) };
   }
 
   /**
@@ -335,9 +330,7 @@ export class Scene {
     placeKnife(this.knife, this.layout, cut.tiltRad, cut.lowerM, 0);
     this.showWholeCake();
     this.labelTops = prepared.labelTops;
-    if (!cut.isCutThrough) return;
-    this.splitHalves(calcKnifeNormal(cut.tiltRad));
-    this.halves.forEach((half, idx) => half.toM.copy(prepared.rests[idx]));
+    if (cut.isCutThrough) this.splitHalves(calcKnifeNormal(cut.tiltRad));
   }
 
   /** Swaps the whole cake, posed as it is, for its two halves along the plane through the pivot of unit `normal`, together. */
@@ -349,7 +342,7 @@ export class Scene {
     for (const half of this.halves) {
       half.normal.copy(normal).multiplyScalar(half.side);
       half.fromM.copy(level).multiplyScalar(half.side * this.calcBladeClearSlideM(normal));
-      half.toM.copy(half.fromM);
+      half.toM.copy(level).multiplyScalar(half.side * PARTED_SLIDE_M);
       for (const mesh of half.group.children) {
         mesh.position.copy(this.cake.position);
         mesh.quaternion.copy(this.cake.quaternion);
@@ -365,10 +358,7 @@ export class Scene {
     return (this.layout.blade_thickness_m / 2 + BLADE_CLEARANCE_M) / Math.hypot(normal.x, normal.z);
   }
 
-  /**
-   * Parts the halves from `showHalves` or `stageCut` by `share`, from 0 together to 1 where each
-   * comes to rest, as `calcHalfRests` chose, which `hasHalfRests` tells has been found.
-   */
+  /** Parts the halves from `showHalves` or `stageCut` by `share`, from 0 together to 1 where each ends. */
   setHalfPartShare(share: number): void {
     this.partShare = share;
   }
@@ -376,27 +366,6 @@ export class Scene {
   /** How far each shown half has slid from where it was cut, in the order `showHalfGrams` labels them, none while the cake shows whole. */
   getHalfSlidesM(): number[] {
     return this.halves.filter((half) => half.cap.visible).map((half) => half.group.position.distanceTo(half.fromM));
-  }
-
-  hasHalfRests(): boolean {
-    return this.halfRestsJob === null;
-  }
-
-  /** Runs `halfRestsJob` for up to `REST_SLICE_MS`, setting each half's rest once it is done. */
-  private stepHalfRests(): void {
-    const job = this.halfRestsJob;
-    if (!job) return;
-    const endMs = performance.now() + REST_SLICE_MS;
-    let step = job.next();
-    while (!step.done && performance.now() < endMs) step = job.next();
-    if (!step.done) return;
-    this.halves.forEach((half, idx) => half.toM.copy(step.value[idx]));
-    this.halfRestsJob = null;
-  }
-
-  private calcSupports(): Supports {
-    const layout = this.layout;
-    return { tableHalfXM: layout.table_half_x_m, tableHalfZM: layout.table_half_z_m, plateRadiusM: layout.stand_radius_m, plateTopYM: layout.stand_top_y_m, standParts: get_stand_parts() };
   }
 
   /**
@@ -421,7 +390,6 @@ export class Scene {
 
   render(): void {
     if (this.framesUntilWarm > 0 && --this.framesUntilWarm === 0) this.warmHalves();
-    this.stepHalfRests();
     for (const half of this.halves) {
       if (!half.cap.visible) continue;
       half.group.position.lerpVectors(half.fromM, half.toM, this.partShare);

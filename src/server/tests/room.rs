@@ -38,7 +38,7 @@ const JUDGING_DELAY_MS: u64 = 3_000;
 const SEAT_HOLD_MS: u64 = 3_600_000;
 /// The real judging reveal's lengths, for the tests of it.
 const JUDGING_HOLD_MS: u64 = 500;
-const JUDGING_MAX_COUNT_MS: u64 = 3_000;
+const JUDGING_MAX_COUNT_MS: u64 = 4_000;
 const JUDGING_AFTER_MS: u64 = 500;
 const JUDGING_TAIL_MS: u64 = 1_500;
 /// A perfect cut's judging scene, the longest any player's takes.

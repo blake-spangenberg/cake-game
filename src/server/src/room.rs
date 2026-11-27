@@ -105,7 +105,7 @@ impl Default for RoomConfig {
             judging_delay_ms: 3_000,
             judging_hold_ms: 500,
             judging_min_count_ms: 1_500,
-            judging_max_count_ms: 3_000,
+            judging_max_count_ms: 4_000,
             judging_after_ms: 500,
             judging_tail_ms: 1_500,
         }

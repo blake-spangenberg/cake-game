@@ -328,7 +328,7 @@ function animateCut(nowMs: number): void {
     scene.showHalves(game);
     cut.splitLowerM = null;
   }
-  if (!isDone || cut.isOnline || !scene.hasHalfRests()) return;
+  if (!isDone || cut.isOnline) return;
   cut.revealStartMs ??= nowMs;
   const frame = calcRevealFrame((nowMs - cut.revealStartMs) / 1000, buildOwnScene(cut.halvesG), cut.halvesG);
   scene.setHalfPartShare(frame.partShare);

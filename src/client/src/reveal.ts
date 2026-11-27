@@ -1,8 +1,8 @@
 /**
  * The timing of a cut's reveal, shared by the online judging and the offline practice's own cut:
  * the halves together, then both sliding apart in place at a constant velocity while a gram
- * counter over each counts up from 0. The slides start with the counters and end with the larger
- * half's counter, as the score shows. A cut that missed the cake skips the count.
+ * counter over each counts up from 0. The slides and both counters start together and end together,
+ * as the score shows. A cut that missed the cake skips the count.
  */
 
 /**
@@ -16,14 +16,22 @@ export interface RevealScene {
   countS: number;
 }
 
-/** The offline practice's own cut, revealed once the knife has settled in it: shorter counts than the judged ones' 1.5 to 3 s. */
+/** The offline practice's own cut, revealed once the knife has settled in it, counting as long as a judged one. */
 const OWN_HOLD_S = 0.3;
-const OWN_MIN_COUNT_S = 1.2;
-const OWN_MAX_COUNT_S = 2.4;
-/** The count's ease, in grams (see `Wheel`): its last gram takes about `countS / (1 + EASE_G)`, 0.4 s of a perfect cut's 3 s count. */
-const EASE_G = 6.5;
+const OWN_MIN_COUNT_S = 1.5;
+const OWN_MAX_COUNT_S = 4;
+/** The share of a count that climbs from 0 up to its last `FINISH_G` grams. */
+const CLIMB_SHARE = 1 / 6;
+const FINISH_G = 15;
+/**
+ * How long each of the finish's grams takes against the one after it. The last gram takes about a
+ * fifth of the count, 0.8 s of a perfect cut's 4 s.
+ */
+const FINISH_RATIO = 0.7647;
+/** Halvings that find a climb's starting speed to a double's precision. */
+const CLIMB_SEARCH_STEPS = 60;
 /** Absorbs the float error of a count landing exactly on a whole gram, far under a gram. */
-const WHOLE_GRAM_SLACK_G = 1e-9;
+const WHOLE_GRAM_SLACK_G = 1e-6;
 
 /**
  * A reveal at one moment: how far both halves have slid apart, from 0 to 1, each counter's grams in
@@ -36,15 +44,27 @@ export interface RevealFrame {
 }
 
 /**
- * The count as one wheel slowing smoothly to a stop at `endG` after `countS`, every gram taking
- * longer than the one before. With `gLeft` grams to go, it stops in `limitS * gLeft / (gLeft + EASE_G)`
- * seconds.
+ * One counter as a wheel slowing smoothly to a stop at `endG` after `countS`, every gram taking
+ * longer than the one before. With `gLeft` grams to go in its finish, it stops in
+ * `finishScaleS * (1 - FINISH_RATIO ** gLeft)` seconds. Its finish is the last `FINISH_G` grams,
+ * reached by the climb, or the whole count for a half too light to climb faster than its finish
+ * starts.
  */
 interface Wheel {
-  /** The larger half's grams as its counter shows them, where the count stops. */
+  /** The half's grams as its counter shows them, where the count stops. */
   endG: number;
   countS: number;
-  limitS: number;
+  finishScaleS: number;
+  climb: Climb | null;
+}
+
+/** The count from 0 to the finish: its speed falls exponentially from `startGPerS` into the finish's own first speed. */
+interface Climb {
+  durationS: number;
+  /** The grams it covers. */
+  lenG: number;
+  startGPerS: number;
+  decayPerS: number;
 }
 
 /**
@@ -60,20 +80,16 @@ export function buildOwnScene(halvesG: readonly number[]): RevealScene {
 }
 
 /**
- * `scene` `elapsedS` in for halves of `halvesG` grams, or for a cut that missed, `[]`. Every
- * counter shows the same count until it reaches its own half's weight, so a perfect cut stops both
- * at once and a bad one counts the larger half on alone. Both halves slide until the count ends,
- * the smaller one's counter stopping first.
+ * `scene` `elapsedS` in for halves of `halvesG` grams, or for a cut that missed, `[]`. Each counter
+ * counts to its own half's weight over the whole count, so both stop as the halves do.
  */
 export function calcRevealFrame(elapsedS: number, scene: RevealScene, halvesG: readonly number[]): RevealFrame {
   const isCounted = elapsedS >= calcCountedS(scene);
   if (halvesG.length === 0) return { partShare: 0, shownG: [], isCounted };
-  const wheel = buildWheel(scene, halvesG);
-  const countG = Math.floor(calcCountG(wheel, elapsedS - scene.holdS) + WHOLE_GRAM_SLACK_G);
   return {
     // Checked first, since the division can round a hair short of 1 on the frame the count ends.
     partShare: isCounted ? 1 : Math.max(elapsedS - scene.holdS, 0) / scene.countS,
-    shownG: halvesG.map((g) => Math.min(countG, Math.round(g))),
+    shownG: halvesG.map((g) => Math.floor(calcCountG(buildWheel(scene, g), elapsedS - scene.holdS) + WHOLE_GRAM_SLACK_G)),
     isCounted,
   };
 }
@@ -84,14 +100,15 @@ export function calcCountedS(scene: RevealScene): number {
 }
 
 /**
- * When the counters of halves of `halvesG` tick in `scene`, in seconds from its start, none for a
- * miss (`[]`): on each gram from the last, which ends the count with the score, back to where
- * grams come faster than one every `minGapS`, and before that every `minGapS` back to the first
- * gram, so the fast start rattles and the ticks never come closer together as the count slows.
+ * When the count of halves of `halvesG` ticks in `scene`, in seconds from its start, none for a
+ * miss (`[]`), following the larger half's counter: on each gram from the last, which ends the
+ * count with the score, back to where grams come faster than one every `minGapS`, and before that
+ * every `minGapS` back to the first gram, so the fast start rattles and the ticks never come closer
+ * together as the count slows.
  */
 export function calcCountTicksS(scene: RevealScene, halvesG: readonly number[], minGapS: number): number[] {
   if (halvesG.length === 0) return [];
-  const wheel = buildWheel(scene, halvesG);
+  const wheel = buildWheel(scene, Math.max(...halvesG));
   const ticksS: number[] = [];
   let g = wheel.endG;
   for (; g >= 1; g -= 1) {
@@ -105,24 +122,50 @@ export function calcCountTicksS(scene: RevealScene, halvesG: readonly number[], 
 
 /** When `wheel`'s count reaches `g` grams in `scene`, in seconds from its start. */
 function calcReachedS(scene: RevealScene, wheel: Wheel, g: number): number {
-  return scene.holdS + wheel.countS - calcTimeToGoS(wheel, wheel.endG - g);
+  const { climb } = wheel;
+  if (climb && g < climb.lenG) return scene.holdS - Math.log(1 - (g * climb.decayPerS) / climb.startGPerS) / climb.decayPerS;
+  return scene.holdS + wheel.countS - wheel.finishScaleS * (1 - FINISH_RATIO ** (wheel.endG - g));
 }
 
-/** The wheel of halves of `halvesG` grams that stops `scene.countS` after it starts. */
-function buildWheel(scene: RevealScene, halvesG: readonly number[]): Wheel {
-  const endG = Math.round(Math.max(...halvesG));
-  return { endG, countS: scene.countS, limitS: endG > 0 ? (scene.countS * (endG + EASE_G)) / endG : 0 };
+/** The wheel of a half of `halfG` grams that stops `scene.countS` after it starts. */
+function buildWheel(scene: RevealScene, halfG: number): Wheel {
+  const endG = Math.round(halfG);
+  const { countS } = scene;
+  const durationS = countS * CLIMB_SHARE;
+  const finishScaleS = (countS - durationS) / (1 - FINISH_RATIO ** FINISH_G);
+  const finishStartGPerS = 1 / (finishScaleS * -Math.log(FINISH_RATIO) * FINISH_RATIO ** FINISH_G);
+  const lenG = endG - FINISH_G;
+  // The climb's mean speed over the finish's first: at 1 or less, no falling speed covers it.
+  const meanShare = lenG / (durationS * finishStartGPerS);
+  if (meanShare <= 1) return { endG, countS, finishScaleS: countS / (1 - FINISH_RATIO ** endG), climb: null };
+  const startShare = calcStartShare(meanShare);
+  const climb = { durationS, lenG, startGPerS: startShare * finishStartGPerS, decayPerS: Math.log(startShare) / durationS };
+  return { endG, countS, finishScaleS, climb };
 }
 
-/** How long `wheel` takes to stop from `gLeft` grams short of its end. */
-function calcTimeToGoS(wheel: Wheel, gLeft: number): number {
-  return (wheel.limitS * gLeft) / (gLeft + EASE_G);
+/**
+ * How many times its end speed an exponentially slowing climb starts at, for its mean speed to be
+ * `meanShare` times its end speed: the `x > 1` with `(x - 1) / ln x = meanShare`, for `meanShare > 1`.
+ */
+function calcStartShare(meanShare: number): number {
+  let low = 1;
+  // `(x - 1) / ln x` exceeds `meanShare` here for any `meanShare > 1`.
+  let high = 4 * meanShare * meanShare;
+  for (let step = 0; step < CLIMB_SEARCH_STEPS; step += 1) {
+    const mid = Math.sqrt(low * high);
+    if ((mid - 1) / Math.log(mid) > meanShare) high = mid;
+    else low = mid;
+  }
+  return high;
 }
 
-/** The wheel's count `countS` into counting, the inverse of `calcTimeToGoS`. */
+/** The wheel's count `countS` into counting, the inverse of `calcReachedS`. */
 function calcCountG(wheel: Wheel, countS: number): number {
-  if (countS <= 0) return 0;
+  // A half under half a gram has no gram to count, which the curve below does not cover.
+  if (countS <= 0 || wheel.endG === 0) return 0;
   const toGoS = wheel.countS - countS;
   if (toGoS <= 0) return wheel.endG;
-  return wheel.endG - (EASE_G * toGoS) / (wheel.limitS - toGoS);
+  const { climb } = wheel;
+  if (climb && countS < climb.durationS) return (climb.startGPerS / climb.decayPerS) * (1 - Math.exp(-climb.decayPerS * countS));
+  return wheel.endG - Math.log(1 - toGoS / wheel.finishScaleS) / Math.log(FINISH_RATIO);
 }

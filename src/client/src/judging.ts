@@ -1,10 +1,9 @@
 import * as THREE from "three";
 import type { Layout } from "@wasm/cake_wasm.js";
-import type { SlicedJob } from "./halfRest";
 import type { CutMessage, JudgingMessage, Standing } from "./net";
 import { AIM_HEIGHT_SHARE } from "./orbit";
 import { type RevealScene, calcCountTicksS, calcCountedS, calcRevealFrame } from "./reveal";
-import { type PreparedCut, type Scene, type StagedCut, finishJob } from "./scene";
+import { type PreparedCut, type Scene, type SlicedJob, type StagedCut, finishJob } from "./scene";
 import { RevealSounds } from "./sound";
 import { buildStandingRow, findShownPlace, isMedalPlace, isMiss, setScoreText } from "./standings";
 
