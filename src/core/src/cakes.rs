@@ -1,4 +1,4 @@
-use core::f32::consts::TAU;
+use core::f32::consts::{PI, TAU};
 
 use rapier3d::math::Vec3;
 use rapier3d::prelude::SharedShape;
@@ -231,6 +231,8 @@ impl Reader<'_> {
 
 /// A placeholder until sourced models arrive: a round cake with a slice missing, under a smaller
 /// tier set off center.
+///
+/// Mirrored about `x = 0` with the spawn, so the tests tuned to it before the mirror still hold.
 #[must_use]
 #[expect(
     clippy::cast_possible_truncation,
@@ -245,9 +247,10 @@ pub fn build_slice_missing_cake() -> CakeModel {
         corner_normals: CornerNormals::default(),
         hulls: Vec::new(),
     };
-    let missing_slice_start = 290.0_f32.to_radians();
-    let split = missing_slice_start / 2.0;
-    for (angle0, angle1) in [(0.0, split), (split, missing_slice_start)] {
+    let solid_start = (-110.0_f32).to_radians();
+    let solid_end = 180.0_f32.to_radians();
+    let split = solid_start.midpoint(solid_end);
+    for (angle0, angle1) in [(solid_start, split), (split, solid_end)] {
         let build_outline = |segments_per_turn: f32| {
             let point_len = libm::ceilf(segments_per_turn * (angle1 - angle0) / TAU) as u32 + 1;
             let mut outline = vec![[0.0, 0.0]];
@@ -256,11 +259,11 @@ pub fn build_slice_missing_cake() -> CakeModel {
         };
         add_prism(&mut model, build_outline, 0.0, 0.07);
     }
-    let top_offset_angle = 145.0_f32.to_radians();
+    let top_offset_angle = 35.0_f32.to_radians();
     let top_center = [0.03 * libm::cosf(top_offset_angle), -0.03 * libm::sinf(top_offset_angle)];
     let build_top_outline = |segments_per_turn: f32| {
         let point_len = segments_per_turn as u32;
-        calc_arc_outline(top_center, 0.055, 0.0, TAU * (1.0 - 1.0 / segments_per_turn), point_len)
+        calc_arc_outline(top_center, 0.055, PI, PI + TAU * (1.0 - 1.0 / segments_per_turn), point_len)
     };
     add_prism(&mut model, build_top_outline, 0.07, 0.12);
     model.corner_normals =

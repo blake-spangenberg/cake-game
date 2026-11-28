@@ -29,8 +29,8 @@ pub const HOST_PASSWORD: &str = "greylag";
 const POSE_INTERVAL_STEPS: u32 = 2;
 /// The most ticks one step holds a world on toward the round's clock beyond the clock's own
 /// advance since the last step. A world that joined the round late catches up over steps, each
-/// costing about 3 ms on a detailed cake, rather than in one step of a whole round's ticks, about
-/// 170 ms. It still catches up within the grace of the round's last tick, so the deadline finds
+/// costing at most about 4 ms on the costliest cake on the N100 host, rather than in one step of a
+/// whole round's ticks. It still catches up within the grace of the round's last tick, so the deadline finds
 /// it cut.
 const MAX_HELD_TICKS_PER_STEP: u32 = 30;
 /// Bot ids count up from just past this, far above any connection's, so the two never meet.
@@ -105,7 +105,7 @@ impl Default for RoomConfig {
             judging_delay_ms: 3_000,
             judging_hold_ms: 500,
             judging_min_count_ms: 1_500,
-            judging_max_count_ms: 4_000,
+            judging_max_count_ms: 3_300,
             judging_after_ms: 500,
             judging_tail_ms: 1_500,
         }

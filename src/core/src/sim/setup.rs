@@ -10,13 +10,14 @@ use super::mass::calc_mass_properties;
 use super::squash::HullFrame;
 use super::{CAKE_FRICTION, FREE_ANGULAR_DAMPING, FREE_LINEAR_DAMPING};
 use crate::cakes::CakeModel;
-use crate::cut::DENSITY_G_PER_M3;
 use crate::knife::{HANDLE_LEN_M, HANDLE_RADIUS_M, Knife, Solid, build_blade_hull, calc_handle_centers};
 use crate::mesh::{Mesh, calc_arc_outline};
 use crate::table::{CAKE_SPAWN, STAND_PARTS, STAND_RADIUS_M, TABLE_HALF_X_M, TABLE_HALF_Z_M};
 use crate::triangle_tree::TriangleTree;
 
 const STAND_SEGMENTS: u32 = 48;
+/// Every cake's mass density in the simulation, apart from the grams players see.
+const CAKE_DENSITY_KG_PER_M3: f32 = 1000.0;
 
 /// A cake model with what every world on it derives from the model alone, built once so that
 /// worlds on the same cake, such as a round's on the server, share it through an `Arc`.
@@ -41,8 +42,7 @@ impl Cake {
         let mesh = &model.mesh;
         let tree = TriangleTree::build(&mesh.positions, &mesh.triangles);
         let width_range_m = mesh.calc_width_range_m(Some(&tree));
-        let density_kg_per_m3 = (DENSITY_G_PER_M3 / 1000.0) as f32;
-        let mass = calc_mass_properties(density_kg_per_m3, &mesh.positions, &mesh.triangles);
+        let mass = calc_mass_properties(CAKE_DENSITY_KG_PER_M3, &mesh.positions, &mesh.triangles);
         let hull_shapes: Vec<SharedShape> = model
             .hulls
             .iter()

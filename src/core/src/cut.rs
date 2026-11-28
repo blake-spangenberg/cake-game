@@ -14,8 +14,9 @@ pub struct Split {
     pub below_m3: f64,
 }
 
-/// Grams per cubic meter, uniform for every cake.
-pub const DENSITY_G_PER_M3: f64 = 1.0e6;
+/// Grams per cubic meter, uniform for every cake. Only the grams players see: the simulation's
+/// mass uses its own density, so lighter grams leave the physics alone.
+pub const DENSITY_G_PER_M3: f64 = 6.0e5;
 pub const MAX_SCORE: f64 = 100.0;
 
 impl Split {

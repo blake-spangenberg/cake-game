@@ -135,8 +135,8 @@ impl World {
         nearness * nearness * (3.0 - 2.0 * nearness)
     }
 
-    fn calc_lowest_y_m(&self) -> f64 {
-        self.cake_positions.iter().map(|p| p.y).fold(f64::INFINITY, f64::min)
+    const fn calc_lowest_y_m(&self) -> f64 {
+        self.cake_bounds.0.y
     }
 
     /// Whether the cake's bounding box reaches over the stand's plate.
@@ -148,10 +148,7 @@ impl World {
     /// negative amount where it reaches over the plate.
     #[expect(clippy::similar_names, reason = "x and z name the axes")]
     fn calc_stand_gap_m(&self) -> f64 {
-        let (mut min, mut max) = (DVec3::INFINITY, DVec3::NEG_INFINITY);
-        for p in &self.cake_positions {
-            (min, max) = (min.min(*p), max.max(*p));
-        }
+        let (min, max) = self.cake_bounds;
         let nearest_x_m = 0.0_f64.clamp(min.x, max.x);
         let nearest_z_m = 0.0_f64.clamp(min.z, max.z);
         libm::sqrt(nearest_x_m * nearest_x_m + nearest_z_m * nearest_z_m) - STAND_RADIUS_M

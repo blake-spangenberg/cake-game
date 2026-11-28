@@ -15,6 +15,7 @@ import { Opponents } from "./opponents";
 import { Orbit } from "./orbit";
 import { watchActivity } from "./profile";
 import { fetchPropAssets } from "./props";
+import { AdaptiveResolution } from "./resolution";
 import { buildOwnScene, calcRevealFrame } from "./reveal";
 import { CakePreloader, freeRoundCake } from "./roundCakes";
 import { type PickKind, Scene } from "./scene";
@@ -82,6 +83,8 @@ if (room) {
 }
 const assets = await propAssets;
 const scene = new Scene(canvas, layout, assets);
+const resolution = new AdaptiveResolution(frameMs);
+scene.setPixelRatio(resolution.getPixelRatio());
 const preloader = new CakePreloader(scene);
 // The second renderer gets a frame of its own, since a first visit's first WebGL context alone took up to 84 ms.
 if (lobby) await waitFrames(1);
@@ -130,6 +133,13 @@ let catchUpStartMs: number | null = null;
 /** The online round's players, and those whose cut this page has heard of, so it knows when the last has cut. */
 const roundPlayerIds = new Set<number>();
 const cutPlayerIds = new Set<number>();
+/** The countdown's ticks as they stood once every round player had cut, which it then holds to the judging. */
+let frozenCountdownTicks: CountdownTicks | null = null;
+
+interface CountdownTicks {
+  left: number;
+  total: number;
+}
 
 /** An online round the server started: this page's time at its tick 0. */
 interface StartedRound {
@@ -313,6 +323,12 @@ function blowIfLastCut(): void {
   for (const id of roundPlayerIds) {
     if (id !== myId && !cutPlayerIds.has(id)) return;
   }
+  endRoundCountdown();
+}
+
+/** Ends the countdown's running and its sounds at the round's last cut, holding the pie and digits where they stand. */
+function endRoundCountdown(): void {
+  frozenCountdownTicks ??= findCountdownTicks(performance.now());
   roundSounds.blowForLastCut();
 }
 
@@ -527,7 +543,7 @@ function onServerMessage(message: ServerMessage): void {
       blowIfLastCut();
       break;
     case "play_over":
-      roundSounds.blowForLastCut();
+      endRoundCountdown();
       break;
     case "judging":
       // A page that joined after the last cut heard no whistle and should not hear one now.
@@ -568,6 +584,7 @@ function onRoom(room: Extract<ServerMessage, { type: "room" }>): void {
 function onRound(cake: CakeEntry, ticks: number, players: readonly Member[]): void {
   roundPlayerIds.clear();
   cutPlayerIds.clear();
+  frozenCountdownTicks = null;
   for (const player of players) roundPlayerIds.add(player.id);
   const others = players.filter((player) => player.id !== myId);
   opponents!.open(others);
@@ -727,11 +744,13 @@ function findScreen(): Screen {
 
 /**
  * The round's ticks in all and left to play: a playing page's by its world, and a spectator's or
- * a page that has cut's by the server's clock, which runs to the round's end. None before a start
+ * a page that has cut's by the server's clock, which runs to the round's end, or where they stood
+ * once every player had cut. None before a start
  * or once the judging starts.
  */
-function findCountdownTicks(nowMs: number): { left: number; total: number } | null {
+function findCountdownTicks(nowMs: number): CountdownTicks | null {
   if (online.kind === "judging") return null;
+  if (frozenCountdownTicks) return frozenCountdownTicks;
   if (online.kind === "spectating") {
     return online.started && { left: online.ticks - calcClockTick(online.started, nowMs), total: online.ticks };
   }
@@ -804,6 +823,8 @@ function onFrame(nowMs: number): void {
   if (net) opponents!.render(nowMs, net.poses);
   fpsMeter?.record(nowMs, elapsedMs);
   roundTimer?.update(nowMs);
+  const pixelRatio = resolution.record(nowMs, elapsedMs);
+  if (pixelRatio !== null) scene.setPixelRatio(pixelRatio);
 }
 
 scene.resetCake(await scene.loadCake(game));

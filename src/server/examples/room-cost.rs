@@ -155,7 +155,7 @@ fn drain_for_results(inboxes: &mut [Receiver<Frame>]) -> bool {
 fn build_typical_inputs(model: &CakeModel) -> Vec<Input> {
     let carry = HandInput { grab_at: calc_spawned_top_grab_at(model), target_xz: [0, quantize_meters(0.02)] };
     let start_tilt = quantize_radians(START_TILT_RAD);
-    let aimed_tilt = quantize_radians(-0.2);
+    let aimed_tilt = quantize_radians(0.2);
     let checked_lower = quantize_meters(0.15);
     let turned_stand = quantize_radians(0.5);
     let ease = |tick: i32, from: i32, to: i32, start: i32, len: i32| {

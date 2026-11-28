@@ -1,14 +1,15 @@
 //! Simulated players a `?debug` page adds to the room, which play every round they are in.
 //!
-//! As a page would, each carries the cake onto the stand, sways the knife's tilt and the stand's
-//! angle, and cuts at a random tick, its messages reaching the room a set latency late each way.
+//! As a page would, each carries the cake onto the stand, turns the stand to a random heading,
+//! sways the knife's tilt and the stand's angle about it, and cuts at a random tick, its messages
+//! reaching the room a set latency late each way.
 
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 use std::hash::{BuildHasher, RandomState};
 
 use cake_core::cakes::CakeModel;
 use cake_core::input::{HandInput, Input, KnifeInput, quantize_meters, quantize_radians};
-use cake_core::knife::MAX_TILT_RAD;
+use cake_core::knife::START_TILT_RAD;
 use cake_core::replay::calc_spawned_top_grab_at;
 
 use crate::replay::Replay;
@@ -20,6 +21,8 @@ const CARRY_TARGET_M: [f64; 2] = [0.0, 0.02];
 /// The tick of a bot's play from which it sways the knife and the stand, having eased the knife
 /// from its start tilt to upright until then.
 const SWAY_START_TICK: u32 = 300;
+/// How long a bot takes to turn the stand to its random heading, from the tick its sway starts.
+const STAND_TURN_TICKS: u32 = 240;
 const TILT_SWAY_RAD: f64 = 0.25;
 const STAND_SWAY_RAD: f64 = 0.3;
 /// The sways' periods in ticks, each bot's a little longer than the one before, so bots differ.
@@ -41,6 +44,8 @@ pub struct BotPlay {
     next_tick: u32,
     is_cut: bool,
     grab_at: [i32; 3],
+    /// Where the bot turns the stand to, at random within half a turn either way.
+    stand_heading_rad: f64,
 }
 
 impl BotPlay {
@@ -53,6 +58,7 @@ impl BotPlay {
             next_tick: 0,
             is_cut: false,
             grab_at: calc_spawned_top_grab_at(model),
+            stand_heading_rad: PI * (2.0 * pick_share() - 1.0),
         }
     }
 
@@ -87,7 +93,10 @@ impl BotPlay {
         self.next_tick = self.next_tick.max(start_tick);
         let end_tick = arrived_tick.min(replay.get_world().get_tick() + max_lead).min(round_ticks);
         while self.next_tick < end_tick {
-            replay.push_input(self.next_tick, build_input(number, self.next_tick - start_tick, self.grab_at));
+            replay.push_input(
+                self.next_tick,
+                build_input(number, self.next_tick - start_tick, self.grab_at, self.stand_heading_rad),
+            );
             self.next_tick += 1;
             if self.next_tick == cut_tick {
                 replay.push_cut(cut_tick);
@@ -118,16 +127,18 @@ fn pick_share() -> f64 {
     (RandomState::new().hash_one(()) >> 11) as f64 / (1_u64 << 53) as f64
 }
 
-/// Bot `number`'s input on tick `tick` of its play, grabbing the cake at `grab_at`.
-fn build_input(number: u32, tick: u32, grab_at: [i32; 3]) -> Input {
+/// Bot `number`'s input on tick `tick` of its play, grabbing the cake at `grab_at` and turning the
+/// stand toward `stand_heading_rad`.
+fn build_input(number: u32, tick: u32, grab_at: [i32; 3], stand_heading_rad: f64) -> Input {
     let hand =
         CARRY_TICKS.contains(&tick).then(|| HandInput { grab_at, target_xz: CARRY_TARGET_M.map(quantize_meters) });
     let sway_ticks = f64::from(tick.saturating_sub(SWAY_START_TICK));
     let lead = (f64::from(tick) / f64::from(SWAY_START_TICK)).min(1.0);
     let tilt_period = f64::from(TILT_PERIOD_TICKS + TILT_PERIOD_STEP_TICKS * number);
     let stand_period = f64::from(STAND_PERIOD_TICKS + STAND_PERIOD_STEP_TICKS * number);
-    let tilt_rad = (1.0 - lead) * MAX_TILT_RAD + TILT_SWAY_RAD * (TAU * sway_ticks / tilt_period).sin();
-    let stand_rad = STAND_SWAY_RAD * (TAU * sway_ticks / stand_period).sin();
+    let turn = (sway_ticks / f64::from(STAND_TURN_TICKS)).min(1.0);
+    let tilt_rad = (1.0 - lead) * START_TILT_RAD + TILT_SWAY_RAD * (TAU * sway_ticks / tilt_period).sin();
+    let stand_rad = turn * stand_heading_rad + STAND_SWAY_RAD * (TAU * sway_ticks / stand_period).sin();
     Input {
         hand,
         knife: KnifeInput { tilt: quantize_radians(tilt_rad), lower: 0 },

@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import { Spring } from "./spring";
 
-const START_YAW_RAD = 0.5;
+/** Negative, with the cake's spawn and the knife's start tilt, so the cake starts on the screen's left, away from the opponents' view. */
+const START_YAW_RAD = -0.5;
 const START_PITCH_RAD = 0.5;
 /** Distances suit the scene camera's field of view: the start frames the table, the closest the cake with the knife resting over it. */
 const START_DISTANCE_M = 1.15;

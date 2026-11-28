@@ -10,16 +10,10 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { CAKES } from "../src/client/src/cakes.ts";
+import { resolveBrowserPath } from "./browser-path.mjs";
 
 const PREVIEW_SIZE_PX = 256;
 const PREVIEW_EXT = ".webp";
-const BROWSERS = [
-  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  "/usr/bin/microsoft-edge",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-];
 const rootUrl = new URL("../", import.meta.url);
 const clientDir = fileURLToPath(new URL("src/client/", rootUrl));
 const previewsUrl = new URL("assets/previews/", rootUrl);
@@ -31,11 +25,7 @@ if (args.some((arg) => arg !== "--all")) {
   process.exit(2);
 }
 const isAll = args.includes("--all");
-const browserPath = BROWSERS.find((candidate) => existsSync(candidate));
-if (!browserPath) {
-  console.error(`render-previews: no browser found at ${BROWSERS.join(", ")}`);
-  process.exit(1);
-}
+const browserPath = resolveBrowserPath();
 
 mkdirSync(previewsUrl, { recursive: true });
 const sources = existsSync(sourcesUrl) ? JSON.parse(readFileSync(sourcesUrl, "utf8")) : {};

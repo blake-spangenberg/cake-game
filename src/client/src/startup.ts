@@ -5,6 +5,7 @@
  * starts and a player who joins at once waits on neither the game nor the WASM to see the room.
  */
 import { DebugPanel, IS_DEBUG_PAGE, RoundTimer } from "./debug";
+import "./glReport";
 import { Lobby, showFatal } from "./lobby";
 import { Net, type Profile, type ServerMessage, findServerUrl, setSimulatedLatencyMs } from "./net";
 import { loadSeat, recordInput, saveSeat } from "./profile";

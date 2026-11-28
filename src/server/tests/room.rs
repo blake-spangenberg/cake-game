@@ -38,7 +38,7 @@ const JUDGING_DELAY_MS: u64 = 3_000;
 const SEAT_HOLD_MS: u64 = 3_600_000;
 /// The real judging reveal's lengths, for the tests of it.
 const JUDGING_HOLD_MS: u64 = 500;
-const JUDGING_MAX_COUNT_MS: u64 = 4_000;
+const JUDGING_MAX_COUNT_MS: u64 = 3_300;
 const JUDGING_AFTER_MS: u64 = 500;
 const JUDGING_TAIL_MS: u64 = 1_500;
 /// A perfect cut's judging scene, the longest any player's takes.
@@ -439,20 +439,20 @@ fn judging_shows_every_page_each_player_once_in_one_order_then_the_results_after
     assert!(
         alice_messages.iter().any(|message| matches!(message, ServerMessage::Room { phase: PhaseName::Judging, .. }))
     );
-    // Bob's and Carol's misses, judged first, count nothing, and so does Alice's 0.03% sliver.
-    assert_eq!(scenes, (JUDGING_HOLD_MS, vec![0, 0, 0], JUDGING_AFTER_MS));
+    // Bob's and Carol's misses, judged first, count nothing, and Alice's 2% sliver counts for 1 ms.
+    assert_eq!(scenes, (JUDGING_HOLD_MS, vec![0, 0, 1], JUDGING_AFTER_MS));
     let judging = Some((order, scenes, elapsed_ms, standings.clone()));
     assert_eq!(find_judging(&bob.take_messages()), judging);
     assert_eq!(find_judging(&carol.take_messages()), judging);
 
-    let results_ms = 116 + 3 * (JUDGING_HOLD_MS + JUDGING_AFTER_MS) + JUDGING_TAIL_MS;
+    let results_ms = 116 + 3 * (JUDGING_HOLD_MS + JUDGING_AFTER_MS) + 1 + JUDGING_TAIL_MS;
     room.step(results_ms - 1);
     assert_eq!(find_results(&alice.take_messages()), None);
     room.step(results_ms);
     assert_eq!(find_results(&alice.take_messages()), Some(standings));
 }
 
-/// A count long enough that the placement cut's 0.03% sliver counts for a while.
+/// A count long enough that the placement cut's 2% sliver counts for a while.
 const SLIVER_COUNTING_MAX_COUNT_MS: u64 = 1_000_000_000_000;
 
 /// Alice cuts the placement's sliver and Bob misses, both by the step at 116 ms, which starts the
@@ -479,10 +479,10 @@ fn judging_counts_a_cut_from_the_floor_toward_the_longest_count_by_its_score_sha
     let (_room, mut alice) = judge_a_sliver_and_a_miss(config);
 
     let (order, (_, count_ms, _), _, standings) = find_judging(&alice.take_messages()).unwrap();
-    assert_eq!(find_standing(&standings, 1).score, 0.030_176_947_593_552_05);
+    assert_eq!(find_standing(&standings, 1).score, 1.959_084_700_841_273_7);
     assert_eq!(order, [2, 1]);
-    // 1e6 ms, plus the 1e12 - 1e6 ms above it times (0.0003017694759355205)^2.
-    assert_eq!(count_ms, [0, 1_091_065]);
+    // 1e6 ms, plus the 1e12 - 1e6 ms above it times (0.019590847008412737)^2.
+    assert_eq!(count_ms, [0, 384_800_903]);
 }
 
 #[test]
@@ -497,8 +497,8 @@ fn judging_gives_way_to_the_results_once_every_scene_has_held_counted_and_linger
     let (mut room, mut alice) = judge_a_sliver_and_a_miss(config);
     alice.take_messages();
 
-    // Bob's miss counts for none and Alice's sliver for 91065 ms.
-    let results_ms = 116 + 2 * (JUDGING_HOLD_MS + JUDGING_AFTER_MS) + 91_065 + JUDGING_TAIL_MS;
+    // Bob's miss counts for none and Alice's sliver for 383801287 ms.
+    let results_ms = 116 + 2 * (JUDGING_HOLD_MS + JUDGING_AFTER_MS) + 383_801_287 + JUDGING_TAIL_MS;
     room.step(results_ms - 1);
     assert_eq!(find_results(&alice.take_messages()), None);
     room.step(results_ms);

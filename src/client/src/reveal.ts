@@ -1,8 +1,8 @@
 /**
  * The timing of a cut's reveal, shared by the online judging and the offline practice's own cut:
- * the halves together, then both sliding apart in place at a constant velocity while a gram
- * counter over each counts up from 0. The slides and both counters start together and end together,
- * as the score shows. A cut that missed the cake skips the count.
+ * the halves together, then both sliding apart in place, fast at first and slowing to a stop, while a
+ * gram counter over each counts up from 0. The slides and both counters start together and end
+ * together, as the score shows. A cut that missed the cake skips the count.
  */
 
 /**
@@ -19,17 +19,19 @@ export interface RevealScene {
 /** The offline practice's own cut, revealed once the knife has settled in it, counting as long as a judged one. */
 const OWN_HOLD_S = 0.3;
 const OWN_MIN_COUNT_S = 1.5;
-const OWN_MAX_COUNT_S = 4;
+const OWN_MAX_COUNT_S = 3.3;
 /** The share of a count that climbs from 0 up to its last `FINISH_G` grams. */
 const CLIMB_SHARE = 1 / 6;
 const FINISH_G = 15;
 /**
  * How long each of the finish's grams takes against the one after it. The last gram takes about a
- * fifth of the count, 0.8 s of a perfect cut's 4 s.
+ * fifth of the count, 0.66 s of a perfect cut's 3.3 s.
  */
 const FINISH_RATIO = 0.7647;
 /** Halvings that find a climb's starting speed to a double's precision. */
 const CLIMB_SEARCH_STEPS = 60;
+/** How long the last gram's tick sounds before the player joins the leaderboard and the ding, long enough to hear the tick apart from it. */
+const SCORED_LAG_S = 0.04;
 /** Absorbs the float error of a count landing exactly on a whole gram, far under a gram. */
 const WHOLE_GRAM_SLACK_G = 1e-6;
 
@@ -88,15 +90,29 @@ export function calcRevealFrame(elapsedS: number, scene: RevealScene, halvesG: r
   if (halvesG.length === 0) return { partShare: 0, shownG: [], isCounted };
   return {
     // Checked first, since the division can round a hair short of 1 on the frame the count ends.
-    partShare: isCounted ? 1 : Math.max(elapsedS - scene.holdS, 0) / scene.countS,
+    partShare: isCounted ? 1 : calcSlowingShare(Math.max(elapsedS - scene.holdS, 0) / scene.countS),
     shownG: halvesG.map((g) => Math.floor(calcCountG(buildWheel(scene, g), elapsedS - scene.holdS) + WHOLE_GRAM_SLACK_G)),
     isCounted,
   };
 }
 
+/** How far a slide that slows evenly to a stop has gone, `timeShare` of the way through it, both from 0 to 1. */
+function calcSlowingShare(timeShare: number): number {
+  return 1 - (1 - timeShare) ** 2;
+}
+
 /** When `scene`'s counting ends with its last gram and the score shows, in seconds from its start. */
 export function calcCountedS(scene: RevealScene): number {
   return scene.holdS + scene.countS;
+}
+
+/**
+ * When the judged player joins the leaderboard, with a ding for a medal place, in seconds from
+ * `scene`'s start: `SCORED_LAG_S` after the last gram's tick, which the ding would otherwise drown
+ * out or follow by a hair as the audio clock rounds both to the same render quantum.
+ */
+export function calcScoredS(scene: RevealScene): number {
+  return calcCountedS(scene) + SCORED_LAG_S;
 }
 
 /**

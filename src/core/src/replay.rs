@@ -60,7 +60,7 @@ fn build_place_and_turn_inputs(model: &CakeModel, tick_len: usize) -> Vec<Input>
         .map(|tick| {
             let tick = tick as i32;
             let hand = (20..240).contains(&tick).then_some(HandInput { grab_at, target_xz: [0, 2_000] });
-            let knife = KnifeInput { tilt: start_tilt - 300 * tick.min(400), lower: 100 * (tick - 300).max(0) };
+            let knife = KnifeInput { tilt: start_tilt + 300 * tick.min(400), lower: 100 * (tick - 300).max(0) };
             Input { hand, knife, stand_angle: 400 * (tick - 300).max(0) }
         })
         .collect()

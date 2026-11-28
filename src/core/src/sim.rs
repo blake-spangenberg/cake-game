@@ -90,6 +90,8 @@ pub struct World {
     cake_positions: Vec<DVec3>,
     /// The cake's pose as of `cake_positions`.
     cake_positions_pose: Pose,
+    /// The least and greatest corners of `cake_positions`' bounding box.
+    cake_bounds: (DVec3, DVec3),
     /// Ticks since the cake fell off the table.
     fallen_ticks: u32,
     /// Where the awake free cake has stayed within [`STILL_DRIFT_M`] of for `still_ticks`.
@@ -140,6 +142,7 @@ impl World {
             waiting_height_m: f64::midpoint(flattest_m, tallest_m),
             cake_positions: Vec::new(),
             cake_positions_pose: Pose::IDENTITY,
+            cake_bounds: (DVec3::ZERO, DVec3::ZERO),
             fallen_ticks: 0,
             still_pose: Pose::IDENTITY,
             still_marks: [Pose::IDENTITY; 2],
@@ -480,11 +483,8 @@ impl World {
 
     /// How tall the cake stands as it is posed now.
     fn calc_cake_height_m(&self) -> f64 {
-        let (low_m, high_m) = self
-            .cake_positions
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), p| (low.min(p.y), high.max(p.y)));
-        high_m - low_m
+        let (min, max) = self.cake_bounds;
+        max.y - min.y
     }
 
     /// Puts a free cake that moved into the pressed blade this tick back where it was before the
@@ -525,14 +525,23 @@ impl World {
         self.update_cake_positions();
     }
 
+    /// Turns the mesh into `cake_positions` and its bounding box, unless the cake has not moved, as
+    /// it never does asleep, where a fresh copy would match the last to the bit.
     fn update_cake_positions(&mut self) {
         let pose = *self.physics.bodies[self.cake].position();
+        if pose == self.cake_positions_pose && !self.cake_positions.is_empty() {
+            return;
+        }
         let rotation = pose.rotation.as_dquat();
         let translation = pose.translation.as_dvec3();
         self.cake_positions_pose = pose;
         self.cake_positions.clear();
         let positions = &self.shared.get_model().mesh.positions;
         self.cake_positions.extend(positions.iter().map(|p| rotation * p.as_dvec3() + translation));
+        self.cake_bounds = self
+            .cake_positions
+            .iter()
+            .fold((DVec3::INFINITY, DVec3::NEG_INFINITY), |(min, max), p| (min.min(*p), max.max(*p)));
     }
 }
 

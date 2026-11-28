@@ -44,10 +44,12 @@ h1,
   --cut-inset: 32px;
 }
 
+/* Touch drags are the game's, not the browser's: a pan it took over would cancel the pointer and drop the cake. */
 #view {
   display: block;
   width: 100%;
   height: 100%;
+  touch-action: none;
 }
 
 /* Presses between the tiles reach the play view beneath; a tile itself takes them, so none grabs what it hides. */
@@ -872,6 +874,29 @@ body:has(#join[open]) #loading {
 }
 
 #round-timer[hidden] {
+  display: none;
+}
+
+/* The ?debug page's WebGL report, over everything, scrollable, for reading on a phone. */
+#gl-report {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  max-width: min(640px, calc(100vw - 16px));
+  max-height: 40vh;
+  margin: 0;
+  padding: 6px 8px;
+  overflow: auto;
+  border-radius: 6px;
+  background: rgb(29 27 25 / 85%);
+  color: var(--cream);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#gl-report[hidden] {
   display: none;
 }
 

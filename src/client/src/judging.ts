@@ -2,9 +2,10 @@ import * as THREE from "three";
 import type { Layout } from "@wasm/cake_wasm.js";
 import type { CutMessage, JudgingMessage, Standing } from "./net";
 import { AIM_HEIGHT_SHARE } from "./orbit";
-import { type RevealScene, calcCountTicksS, calcCountedS, calcRevealFrame } from "./reveal";
+import { type RevealScene, calcCountTicksS, calcRevealFrame, calcScoredS } from "./reveal";
 import { type PreparedCut, type Scene, type SlicedJob, type StagedCut, finishJob } from "./scene";
 import { RevealSounds } from "./sound";
+import { Spring } from "./spring";
 import { buildStandingRow, findShownPlace, isMedalPlace, isMiss, setScoreText } from "./standings";
 
 /** How long a frame may spend preparing judging scenes, as cuts come in during play and through the reveal. */
@@ -18,6 +19,8 @@ const ORBIT_PITCH_RAD = 0.55;
 /** How far the camera stands from the cake's middle, per meter of its bounds' half diagonal, and at least. */
 const FRAME_DISTANCE_PER_RADIUS = 3.4;
 const MIN_FRAME_DISTANCE_M = 0.5;
+/** Half-life of the camera's glide from one scene's look target and distance to the next's, so a change of cake does not jump the view. */
+const AIM_HALF_LIFE_S = 0.3;
 /** The least time between two of the counters' ticks, so their fast start rattles rather than buzzes. */
 const TICK_GAP_MS = 70;
 
@@ -65,6 +68,10 @@ export class Judging {
   private isCakeReady = false;
   private reveal: Reveal | null = null;
   private readonly sounds = new RevealSounds();
+  /** The look target's x, y, and z, and the camera's distance from it, each eased toward the scene on screen. */
+  private readonly aimSprings = [0, 1, 2, 3].map(() => new Spring(0, AIM_HALF_LIFE_S));
+  /** When the camera was last aimed on `performance.now()`'s clock, none while the next aim starts where it points. */
+  private lastAimMs: number | null = null;
 
   constructor(
     private readonly scene: Scene,
@@ -97,6 +104,7 @@ export class Judging {
   /** Starts showing the reveal `message` describes, begun at `startMs` on `performance.now()`'s clock, with an empty leaderboard. */
   start(message: JudgingMessage, startMs: number): void {
     this.reveal = { startMs, scenes: buildJudgedScenes(message), stagedIdx: -1, revealedLen: 0 };
+    this.lastAimMs = null;
     this.startSounds(this.reveal);
     this.boardList.replaceChildren();
     this.nameLabel.textContent = "";
@@ -145,7 +153,7 @@ export class Judging {
     this.scene.setHalfPartShare(frame.partShare);
     if (frame.shownG.length > 0) this.scene.showHalfGrams(frame.shownG);
     this.scoreLabel.hidden = !frame.isCounted;
-    this.aimCamera(prepared.bounds, elapsedMs / 1000);
+    this.aimCamera(prepared.bounds, elapsedMs / 1000, nowMs);
   }
 
   /** Runs the preparations for up to `PREPARE_SLICE_MS`, the reveal's next scenes first. */
@@ -207,10 +215,10 @@ export class Judging {
     return [standing.above_m3, standing.below_m3].map((m3) => m3 * this.layout.density_g_per_m3);
   }
 
-  /** Puts every player judged before scene `sceneIdx` on the leaderboard, and that scene's own once its counting ends `sceneS` in. */
+  /** Puts every player judged before scene `sceneIdx` on the leaderboard, and that scene's own once its last gram's tick has sounded, `sceneS` in. */
   private revealScores(reveal: Reveal, sceneIdx: number, sceneS: number): void {
-    const isCounted = sceneS >= calcCountedS(reveal.scenes[sceneIdx].timing);
-    const revealedLen = sceneIdx + (isCounted ? 1 : 0);
+    const isScored = sceneS >= calcScoredS(reveal.scenes[sceneIdx].timing);
+    const revealedLen = sceneIdx + (isScored ? 1 : 0);
     if (revealedLen <= reveal.revealedLen) return;
     reveal.revealedLen = revealedLen;
     this.showBoard(reveal.scenes.slice(0, revealedLen).map((scene) => scene.standing));
@@ -246,23 +254,34 @@ export class Judging {
       const sceneStartMs = reveal.startMs + startMs;
       for (const s of calcCountTicksS(timing, this.calcHalvesG(standing), TICK_GAP_MS / 1000)) tickAtMs.push(sceneStartMs + s * 1000);
       judged.push(standing);
-      if (isMedalPlace(findShownPlace(standing, calcBoardPlace(standing, judged)))) dingAtMs.push(sceneStartMs + calcCountedS(timing) * 1000);
+      if (isMedalPlace(findShownPlace(standing, calcBoardPlace(standing, judged)))) dingAtMs.push(sceneStartMs + calcScoredS(timing) * 1000);
     }
     this.sounds.start(tickAtMs, dingAtMs);
   }
 
   /**
-   * Orbits the camera `revealS` into the reveal, clockwise about the cake `bounds` and aimed at
-   * the same share of its height as play's camera, from far enough to frame it.
+   * Orbits the camera `revealS` into the reveal, `nowMs` on `performance.now()`'s clock, clockwise
+   * about the cake `bounds` and aimed at the same share of its height as play's camera, from far
+   * enough to frame it. A change of cake moves the look target and distance by easing them.
    */
-  private aimCamera(bounds: THREE.Box3, revealS: number): void {
+  private aimCamera(bounds: THREE.Box3, revealS: number, nowMs: number): void {
     const target = bounds.getCenter(new THREE.Vector3()).setY(THREE.MathUtils.lerp(bounds.min.y, bounds.max.y, AIM_HEIGHT_SHARE));
     const radiusM = bounds.getSize(new THREE.Vector3()).length() / 2;
+    const goals = [target.x, target.y, target.z, Math.max(radiusM * FRAME_DISTANCE_PER_RADIUS, MIN_FRAME_DISTANCE_M)];
+    const isFirstAim = this.lastAimMs === null;
+    const dtS = (nowMs - (this.lastAimMs ?? nowMs)) / 1000;
+    this.lastAimMs = nowMs;
+    const [x, y, z, distanceM] = this.aimSprings.map((spring, idx) => {
+      if (isFirstAim) spring.snap(goals[idx]);
+      spring.target = goals[idx];
+      return spring.step(dtS);
+    });
     const yaw = ORBIT_START_YAW_RAD + ORBIT_RAD_PER_S * revealS;
     const toCamera = new THREE.Vector3(Math.sin(yaw) * Math.cos(ORBIT_PITCH_RAD), Math.sin(ORBIT_PITCH_RAD), Math.cos(yaw) * Math.cos(ORBIT_PITCH_RAD));
     const camera = this.scene.camera;
-    camera.position.copy(target).addScaledVector(toCamera, Math.max(radiusM * FRAME_DISTANCE_PER_RADIUS, MIN_FRAME_DISTANCE_M));
-    camera.lookAt(target);
+    const eased = new THREE.Vector3(x, y, z);
+    camera.position.copy(eased).addScaledVector(toCamera, distanceM);
+    camera.lookAt(eased);
   }
 }
 

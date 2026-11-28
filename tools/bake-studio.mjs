@@ -2,17 +2,11 @@
 // SwiftShader, so every machine bakes the same bytes, and writes it where the client's props.ts loads it.
 // Rerun it after changing the studio's look or upgrading three, whose prefilter it runs.
 // Usage: node tools/bake-studio.mjs
-import { existsSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolveBrowserPath } from "./browser-path.mjs";
 
-const BROWSERS = [
-  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  "/usr/bin/microsoft-edge",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-];
 const rootUrl = new URL("../", import.meta.url);
 const clientDir = fileURLToPath(new URL("src/client/", rootUrl));
 const outUrl = new URL("src/client/src/studio.bin", rootUrl);
@@ -21,11 +15,7 @@ if (process.argv.length > 2) {
   console.error(`usage: node tools/bake-studio.mjs, got ${process.argv.slice(2).join(" ")}`);
   process.exit(2);
 }
-const browserPath = BROWSERS.find((candidate) => existsSync(candidate));
-if (!browserPath) {
-  console.error(`bake-studio: no browser found at ${BROWSERS.join(", ")}`);
-  process.exit(1);
-}
+const browserPath = resolveBrowserPath();
 
 const requireClient = createRequire(new URL("package.json", pathToFileURL(clientDir)));
 const vite = await import(pathToFileURL(requireClient.resolve("vite")));

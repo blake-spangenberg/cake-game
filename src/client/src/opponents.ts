@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { Game, Layout } from "@wasm/cake_wasm.js";
 import { calcCutMotion } from "./cutMotion";
 import { waitFrames } from "./frames";
+import { glReport } from "./glReport";
 import type { Member, PlayerPose } from "./net";
 import { type ShadowArea, addLights, buildCakeGeometry, buildCakeMaterial, buildKnife, buildStand, decodeCakeTexture, placeKnife } from "./props";
 import { playChop } from "./sound";
@@ -154,6 +155,7 @@ export class Opponents {
     this.tickMs = 1000 / ticksPerS;
     const canvas = this.panel.querySelector<HTMLCanvasElement>("canvas")!;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "high-performance" });
+    glReport?.addContext("opponents", this.renderer.getContext());
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     addLights(this.scene, SHADOW);

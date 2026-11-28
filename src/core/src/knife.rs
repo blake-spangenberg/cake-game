@@ -23,7 +23,10 @@ pub const HANDLE_RADIUS_M: f64 = 0.014;
 pub const HANDLE_LEN_M: f64 = 0.09;
 /// The tilt every round starts at, leaned away from any useful cut yet inside the limit, so a
 /// first drag either way visibly moves the knife.
-pub const START_TILT_RAD: f64 = MAX_TILT_RAD * 2.0 / 3.0;
+///
+/// Negative, with the cake's spawn and the start camera's yaw, which mirror the round's layout
+/// about the table's middle.
+pub const START_TILT_RAD: f64 = -MAX_TILT_RAD * 2.0 / 3.0;
 /// The edge's fixed direction: the cake turns on its stand instead of the knife turning.
 const EDGE: DVec3 = DVec3::Z;
 const BLADE_HULL_SEGMENTS: u32 = 16;

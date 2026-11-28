@@ -102,7 +102,7 @@ fn build_inputs(round: Round, model: &CakeModel) -> Vec<Input> {
     });
     let pressing = (0..PRESS_TICKS).map(move |pressed_ticks| {
         let tilt = match round {
-            Round::Wall => start_tilt - TILT_PER_TICK * pressed_ticks,
+            Round::Wall => start_tilt + TILT_PER_TICK * pressed_ticks,
             Round::Top => {
                 let phase = (TILT_PER_TICK * pressed_ticks + ROCK_TILT) % (4 * ROCK_TILT);
                 ROCK_TILT - (phase - 2 * ROCK_TILT).abs()

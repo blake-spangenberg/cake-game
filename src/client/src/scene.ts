@@ -2,12 +2,16 @@ import * as THREE from "three";
 import { type Game, type Layout, get_blade_outline } from "@wasm/cake_wasm.js";
 import { CutFaceMaterial } from "./cutFace";
 import { waitFrames } from "./frames";
+import { glReport } from "./glReport";
 import { HalfLabels } from "./halfLabels";
 import { type Highlight, addHighlight } from "./highlight";
 import { FROSTING, type PropAssets, type ShadowArea, addLights, buildCakeGeometry, buildKnife, buildStand, buildTable, calcKnifeNormal, decodeCakeTexture, placeKnife } from "./props";
 
 /** What a click grabbed: the cake, any part of the knife (blade or handles), or the cake stand. */
 export type PickKind = "cake" | "knife" | "stand";
+
+/** How strongly each kind shows its highlight, from 0 to 1: the large white stand, which a darkening shows plainly, stays subtler than the rest. */
+const HIGHLIGHT_STRENGTH: Record<PickKind, number> = { cake: 1, knife: 1, stand: 0.5 };
 
 /** The color a textured cake's material multiplies its texture by, which leaves it as it is. */
 const UNTINTED = 0xffffff;
@@ -123,6 +127,7 @@ export class Scene {
   ) {
     this.pivot = new THREE.Vector3(0, layout.pivot_y_m, 0);
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true, powerPreference: "high-performance" });
+    glReport?.addContext("scene", this.renderer.getContext());
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.localClippingEnabled = true;
@@ -161,7 +166,8 @@ export class Scene {
   /** Faintly highlights the whole cake, the knife, or the stand, or none of them. */
   setHighlight(kind: PickKind | null): void {
     for (const [highlightKind, highlights] of Object.entries(this.highlights)) {
-      for (const highlight of highlights) highlight.value = highlightKind === kind ? 1 : 0;
+      const strength = highlightKind === kind ? HIGHLIGHT_STRENGTH[kind] : 0;
+      for (const highlight of highlights) highlight.value = strength;
     }
   }
 
@@ -436,10 +442,17 @@ export class Scene {
     this.fitCamera();
   }
 
+  /** Draws `ratio` pixels per CSS pixel from the next frame. */
+  setPixelRatio(ratio: number): void {
+    this.renderer.setPixelRatio(ratio);
+  }
+
   private fitCanvas(): void {
     const canvas = this.renderer.domElement;
-    if (canvas.width === canvas.clientWidth && canvas.height === canvas.clientHeight) return;
-    this.renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+    const ratio = this.renderer.getPixelRatio();
+    const [widthPx, heightPx] = [canvas.clientWidth, canvas.clientHeight];
+    if (canvas.width === Math.floor(widthPx * ratio) && canvas.height === Math.floor(heightPx * ratio)) return;
+    this.renderer.setSize(widthPx, heightPx, false);
     this.fitCamera();
   }
 
@@ -449,7 +462,7 @@ export class Scene {
    * the canvas's middle, or at its vertical middle while the view is not raised.
    */
   private fitCamera(): void {
-    const { width, height } = this.renderer.domElement;
+    const { clientWidth: width, clientHeight: height } = this.renderer.domElement;
     const shiftPx = this.viewShiftPx;
     const raisePx = Math.round(height * VIEW_RAISE_SHARE);
     const fullHeightPx = height + 2 * raisePx;

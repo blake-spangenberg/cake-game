@@ -6,10 +6,11 @@
 // The page runs on a clock this tool advances one 60 Hz frame at a time, on SwiftShader, so a rerun draws the same
 // pixels. The staging's mouse points and the marks' coordinates hold only while the cake, the camera, the controls, and
 // the knife stay as they are: after a change to any of them, check the four images and the printed score of the cut.
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolveBrowserPath } from "./browser-path.mjs";
 
 const VIEW_PX = { width: 1280, height: 960 };
 /** The part of the view each panel shows, at its `cropAt` corner, large enough to hold the cake, the knife, and the Cut! button together. */
@@ -29,13 +30,6 @@ const CUT_BUTTON_PX = [1178, 858];
 /** Frames a drag holds each mouse position, about the 30 ms between moves of `.agent/scripts/drive-client.mjs`. */
 const FRAMES_PER_MOVE = 2;
 const LOAD_TIMEOUT_FRAMES = 1200;
-const BROWSERS = [
-  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  "/usr/bin/microsoft-edge",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-];
 /**
  * Hides the UI no panel shows: the cake picker and credit, the round result, and the Cut! button outside its own step,
  * where it glows as pressed. Enlarges the weight labels to stay legible at panel size.
@@ -329,11 +323,7 @@ async function paintPanel(pngBase64, { cropAt, marks }, cropPx, sizePx, quality)
 }
 
 const rawDir = parseRawDir(process.argv.slice(2));
-const browserPath = BROWSERS.find((candidate) => existsSync(candidate));
-if (!browserPath) {
-  console.error(`render-rules: no browser found at ${BROWSERS.join(", ")}`);
-  process.exit(1);
-}
+const browserPath = resolveBrowserPath();
 mkdirSync(rulesUrl, { recursive: true });
 if (rawDir) mkdirSync(rawDir, { recursive: true });
 await renderAll();

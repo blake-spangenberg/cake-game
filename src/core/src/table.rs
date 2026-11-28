@@ -46,6 +46,8 @@ const PIVOT_CLEARANCE_M: f64 = 0.02;
 pub const PIVOT: DVec3 = DVec3::new(0.0, STAND_TOP_Y_M + MAX_CAKE_EXTENT_M + PIVOT_CLEARANCE_M, 0.0);
 /// Where the cake starts, on the table beside the stand so reaching it costs input distance, and as
 /// far from the stand as keeps every cake on the table, some of which tip over as they settle.
-pub const CAKE_SPAWN: DVec3 = DVec3::new(0.42, 0.0, 0.12);
+///
+/// It starts on the screen's left, which the opponents' view on the right leaves uncovered.
+pub const CAKE_SPAWN: DVec3 = DVec3::new(-0.42, 0.0, 0.12);
 /// A cake whose center falls below this has left the table and respawns.
 pub const RESPAWN_BELOW_Y_M: f64 = -0.3;

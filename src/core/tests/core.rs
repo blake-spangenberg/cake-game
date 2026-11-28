@@ -438,7 +438,7 @@ fn settle_shifted_cake(mut model: CakeModel, shift: Vec3, tilt_rad: f64) -> Worl
 /// A box cake settled on the table where it spawns, shifted along the knife's edge by `shift_z_m`,
 /// with the knife tilted so its plane meets the table through the cake.
 fn settle_box_on_the_table_in_the_knife_plane(shift_z_m: f32) -> World {
-    settle_shifted_cake(build_box_cake(0.15, 0.1, 0.05), Vec3::new(0.0, 0.0, shift_z_m), -core::f64::consts::FRAC_PI_4)
+    settle_shifted_cake(build_box_cake(0.15, 0.1, 0.05), Vec3::new(0.0, 0.0, shift_z_m), core::f64::consts::FRAC_PI_4)
 }
 
 #[test]
@@ -554,7 +554,7 @@ fn cake_let_go_leaning_on_the_stands_rim_comes_to_rest_within_3_s() {
     let [grab_x, _, grab_z] = grab_at.map(|unit| f64::from(unit) * POSITION_UNIT_M);
     for tick in 0..300 {
         let progress = f64::from(tick.min(150)) / 150.0;
-        let target_xz = [grab_x + (0.22 - grab_x) * progress, grab_z * (1.0 - progress)].map(quantize_meters);
+        let target_xz = [grab_x + (-0.22 - grab_x) * progress, grab_z * (1.0 - progress)].map(quantize_meters);
         world.step(&Input { hand: Some(HandInput { grab_at, target_xz }), ..Input::default() });
     }
     for _ in 0..3 * TICKS_PER_S {
@@ -759,7 +759,7 @@ fn short_cake_carried_low_at_the_stand_rises_over_the_plate_rather_than_slipping
     let model = build_box_cake(0.04, 0.05, 0.04);
     let grab_at = calc_spawned_top_grab_at(&model);
     let mut world = World::create(model, START_TILT_RAD, None);
-    let across = [-0.3, 0.0].map(quantize_meters);
+    let across = [0.3, 0.0].map(quantize_meters);
     for tick in 0..120 {
         world.step(&Input { hand: Some(HandInput { grab_at, target_xz: across }), ..Input::default() });
         let depth_m = calc_stand_depth_m(&world);
@@ -770,7 +770,7 @@ fn short_cake_carried_low_at_the_stand_rises_over_the_plate_rather_than_slipping
 #[test]
 fn held_cake_dragged_through_the_stand_does_not_clip_into_it() {
     let (mut world, hand) = hold_cake_by_its_rim();
-    let across = [-0.4, 0.0].map(quantize_meters);
+    let across = [0.4, 0.0].map(quantize_meters);
     let plate_bottom_y_m = STAND_TOP_Y_M - STAND_PLATE_THICKNESS_M;
     for _ in 0..240 {
         world.step(&Input { hand: Some(HandInput { target_xz: across, ..hand }), ..Input::default() });
@@ -787,8 +787,8 @@ fn held_cake_dragged_through_the_stand_does_not_clip_into_it() {
 #[test]
 fn cake_falling_off_the_table_respawns() {
     let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
-    let grab_at = [CAKE_SPAWN.x + 0.11, 0.035, CAKE_SPAWN.z].map(quantize_meters);
-    let edge = [TABLE_HALF_X_M, TABLE_HALF_Z_M].map(quantize_meters);
+    let grab_at = [CAKE_SPAWN.x - 0.11, 0.035, CAKE_SPAWN.z].map(quantize_meters);
+    let edge = [-TABLE_HALF_X_M, TABLE_HALF_Z_M].map(quantize_meters);
     let carry = Input { hand: Some(HandInput { grab_at, target_xz: edge }), ..Input::default() };
     let mut has_left_spawn = false;
     for tick in 0..900 {
@@ -803,7 +803,7 @@ fn cake_falling_off_the_table_respawns() {
 fn held_cake_dragged_into_the_lowered_knife_is_not_pulled_through_the_blade() {
     let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     let grab_at = [CAKE_SPAWN.x, 0.12, CAKE_SPAWN.z].map(quantize_meters);
-    let across = [-0.3, 0.0].map(quantize_meters);
+    let across = [0.3, 0.0].map(quantize_meters);
     let knife = KnifeInput { tilt: 0, lower: quantize_meters(0.2) };
     // Lifted in place first, so the drag carries it high enough to clear the stand's rim and meet
     // the blade, rather than catching on the rim and sliding around the blade's end.
@@ -814,8 +814,8 @@ fn held_cake_dragged_into_the_lowered_knife_is_not_pulled_through_the_blade() {
     }
     let knife = world.get_knife();
     assert!((knife.lower_m - knife.rest_m - 0.2).abs() < 1e-9, "{knife:?}");
-    let max_x_m = world.get_cake_positions().iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-    assert!(max_x_m > 0.02, "the cake passed wholly through the blade, to x <= {max_x_m}");
+    let min_x_m = world.get_cake_positions().iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+    assert!(min_x_m < -0.02, "the cake passed wholly through the blade, to x >= {min_x_m}");
 }
 
 /// With `placeholder_cake_validates`, which holds the bound within `MAX_CAKE_EXTENT_M`, this keeps
@@ -930,9 +930,9 @@ fn calc_blade_overlap_m(world: &World) -> f64 {
 /// from where it spawns onto the stand's middle at 1 m/s under a blade tilted toward it.
 #[test]
 fn resting_knife_rises_clear_of_a_tall_cake_carried_onto_the_stand() {
-    let mut world = World::create(build_box_cake(0.025, 0.25, 0.025), -MAX_TILT_RAD, None);
+    let mut world = World::create(build_box_cake(0.025, 0.25, 0.025), MAX_TILT_RAD, None);
     let grab_at = [CAKE_SPAWN.x, 0.25, CAKE_SPAWN.z].map(quantize_meters);
-    let knife = KnifeInput { tilt: quantize_radians(-MAX_TILT_RAD), lower: 0 };
+    let knife = KnifeInput { tilt: quantize_radians(MAX_TILT_RAD), lower: 0 };
     let (hold_ticks, carry_ticks) = (40, 26);
     for tick in 0..5 * TICKS_PER_S as i32 {
         let progress = f64::from((tick - hold_ticks).clamp(0, carry_ticks)) / f64::from(carry_ticks);
@@ -949,7 +949,7 @@ fn resting_knife_rises_clear_of_a_tall_cake_carried_onto_the_stand() {
 /// side, and holds it still above the table for a second.
 fn hold_cake_by_its_rim() -> (World, HandInput) {
     let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
-    let grab_at = [CAKE_SPAWN.x + 0.11, 0.035, CAKE_SPAWN.z].map(quantize_meters);
+    let grab_at = [CAKE_SPAWN.x - 0.11, 0.035, CAKE_SPAWN.z].map(quantize_meters);
     let hand = HandInput { grab_at, target_xz: [grab_at[0], grab_at[2]] };
     for _ in 0..60 {
         world.step(&Input { hand: Some(hand), ..Input::default() });
@@ -986,7 +986,7 @@ fn dropped_cake_comes_to_rest_without_rolling_away() {
 fn grab_away_from_the_cake_is_ignored() {
     let mut world = World::create(build_slice_missing_cake(), START_TILT_RAD, None);
     let start = world.get_cake_pose().translation;
-    let input = Input { hand: Some(HandInput { grab_at: [-40_000, 1_000, 0], target_xz: [0, 0] }), ..Input::default() };
+    let input = Input { hand: Some(HandInput { grab_at: [40_000, 1_000, 0], target_xz: [0, 0] }), ..Input::default() };
     for _ in 0..60 {
         world.step(&input);
     }
